@@ -29,6 +29,7 @@ import (
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 
 	// Import all Kubernetes client auth plugins so local runs can use the same
@@ -39,8 +40,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	externaldnsv1alpha1 "sigs.k8s.io/external-dns/apis/v1alpha1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	labdnsv1alpha1 "github.com/shednet/labdns/api/v1alpha1"
+	labdnscontroller "github.com/shednet/labdns/internal/controller"
+	"github.com/shednet/labdns/internal/source"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -52,6 +58,9 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(labdnsv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(externaldnsv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(gatewayv1.Install(scheme))
+	utilruntime.Must(gatewayv1beta1.Install(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -62,7 +71,7 @@ func main() {
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var healthAddr string
 	var logLevel string
-	var leaderElect, secureMetrics, enableHTTP2 bool
+	var leaderElect, secureMetrics, enableHTTP2, enableGatewayAPI bool
 
 	flag.StringVar(&metricsAddr, "metrics-addr", "0", "Metrics listener address; use 0 to disable metrics.")
 	flag.StringVar(&healthAddr, "health-addr", ":8081", "Health and readiness listener address.")
@@ -73,6 +82,7 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "Metrics TLS private-key filename.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false, "Enable HTTP/2 for the metrics server.")
 	flag.StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, or error.")
+	flag.BoolVar(&enableGatewayAPI, "enable-gateway-api", false, "Watch Gateway API HTTPRoute sources.")
 	flag.Parse()
 
 	level, err := parseLogLevel(logLevel)
@@ -102,7 +112,18 @@ func main() {
 		metricsOptions.KeyName = metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	config := ctrl.GetConfigOrDie()
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
+	if err != nil {
+		setupLog.Error(err, "unable to create Kubernetes discovery client")
+		os.Exit(1)
+	}
+	if err := checkPrerequisites(discoveryClient, enableGatewayAPI); err != nil {
+		setupLog.Error(err, "startup prerequisites are not satisfied")
+		os.Exit(1)
+	}
+
+	mgr, err := ctrl.NewManager(config, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsOptions,
 		HealthProbeBindAddress: healthAddr,
@@ -115,6 +136,10 @@ func main() {
 	}
 
 	// +kubebuilder:scaffold:builder
+	if err := labdnscontroller.Setup(context.Background(), mgr, source.DiscardOutput{}, enableGatewayAPI); err != nil {
+		setupLog.Error(err, "unable to set up source controllers")
+		os.Exit(1)
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to add health check")

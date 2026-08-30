@@ -25,8 +25,6 @@ for forbidden in \
   '^[[:space:]]*subresources:[[:space:]]*$' \
   '^[[:space:]]*- secrets$' \
   'cloudflare' \
-  'externaldns\.k8s\.io' \
-  'external-dns' \
   'rfc2136' \
   'etcd'; do
   if grep -Eiq -- "${forbidden}" "${rendered}"; then
@@ -34,3 +32,8 @@ for forbidden in \
     exit 1
   fi
 done
+
+if grep -Eq '^  name: dnsendpoints\.externaldns\.k8s\.io$|^kind: DNSEndpoint$' "${rendered}"; then
+  echo "production render must not ship the ExternalDNS DNSEndpoint CRD or instances" >&2
+  exit 1
+fi

@@ -38,9 +38,124 @@ spec:
             type: object
           spec:
             description: spec defines the desired state of DNSProvider
+            properties:
+              ipSources:
+                description: IPSources selects Node labels containing publishable
+                  addresses.
+                properties:
+                  ipv4:
+                    properties:
+                      nodeLabel:
+                        maxLength: 317
+                        minLength: 1
+                        pattern: ^(([a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*/)?[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$
+                        type: string
+                        x-kubernetes-validations:
+                        - message: qualified-name prefix must be at most 253 characters
+                          rule: '!self.contains(''/'') || self.split(''/'')[0].size()
+                            <= 253'
+                    required:
+                    - nodeLabel
+                    type: object
+                  ipv6:
+                    properties:
+                      nodeLabel:
+                        maxLength: 317
+                        minLength: 1
+                        pattern: ^(([a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*/)?[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$
+                        type: string
+                        x-kubernetes-validations:
+                        - message: qualified-name prefix must be at most 253 characters
+                          rule: '!self.contains(''/'') || self.split(''/'')[0].size()
+                            <= 253'
+                    required:
+                    - nodeLabel
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: at least one of ipv4 or ipv6 is required
+                  rule: has(self.ipv4) || has(self.ipv6)
+              providerSpecific:
+                description: ProviderSpecific controls the explicitly allowlisted
+                  ExternalDNS properties.
+                properties:
+                  annotationKeys:
+                    items:
+                      description: AnnotationKey is a Kubernetes qualified name used
+                        as an annotation key.
+                      maxLength: 317
+                      minLength: 1
+                      pattern: ^(([a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*/)?[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$
+                      type: string
+                      x-kubernetes-validations:
+                      - message: qualified-name prefix must be at most 253 characters
+                        rule: '!self.contains(''/'') || self.split(''/'')[0].size()
+                          <= 253'
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-type: set
+                  defaults:
+                    items:
+                      properties:
+                        name:
+                          minLength: 1
+                          type: string
+                        value:
+                          type: string
+                      required:
+                      - name
+                      - value
+                      type: object
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                type: object
+              recordDefaults:
+                description: RecordDefaults supplies source-overridable record settings.
+                properties:
+                  deletionDelay:
+                    default: 60s
+                    type: string
+                    x-kubernetes-validations:
+                    - message: deletionDelay must not be negative
+                      rule: duration(self) >= duration('0s')
+                  ttl:
+                    default: 300
+                    format: int64
+                    maximum: 2147483647
+                    minimum: 1
+                    type: integer
+                type: object
+              zones:
+                description: Zones contains the DNS suffixes this provider may publish.
+                items:
+                  properties:
+                    name:
+                      description: Name is a normalized, lower-case DNS suffix without
+                        a trailing dot.
+                      maxLength: 253
+                      pattern: ^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 64
+                minItems: 1
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+            required:
+            - ipSources
+            - zones
             type: object
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: metadata.name must be at most 63 characters
+          rule: size(self.metadata.name) <= 63
     served: true
     storage: true
