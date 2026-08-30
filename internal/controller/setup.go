@@ -54,7 +54,7 @@ const (
 )
 
 // +kubebuilder:rbac:groups=labdns.shednet.dev,resources=dnsproviders,verbs=get;list;watch
-// +kubebuilder:rbac:groups=externaldns.k8s.io,resources=dnsendpoints,verbs=get;list;watch
+// +kubebuilder:rbac:groups=externaldns.k8s.io,resources=dnsendpoints,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses;ingressclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services;nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
@@ -94,6 +94,12 @@ func Setup(ctx context.Context, mgr manager.Manager, output source.Output, gatew
 		Watches(&labdnsv1alpha1.DNSProvider{}, handler.EnqueueRequestsFromMapFunc(mapper.routeProvider)).
 		Watches(&externaldnsv1alpha1.DNSEndpoint{}, handler.EnqueueRequestsFromMapFunc(mapper.routeEndpoint)).
 		Complete(route)
+}
+
+// SetupLifecycle installs durable deadline recovery when the production output supports it.
+func SetupLifecycle(mgr manager.Manager, output lifecycleOutput, gatewayEnabled bool) error {
+	reconciler := &LifecycleReconciler{Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("labdns-lifecycle"), Output: output, GatewayEnabled: gatewayEnabled}
+	return builder.ControllerManagedBy(mgr).Named("dnsendpoint-lifecycle").For(&externaldnsv1alpha1.DNSEndpoint{}).Complete(reconciler)
 }
 
 func addIndexes(ctx context.Context, indexer client.FieldIndexer, gatewayEnabled bool) error {

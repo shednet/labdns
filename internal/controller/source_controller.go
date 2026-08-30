@@ -65,7 +65,11 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, request ctrl.Request)
 	}
 	identity := source.Identity{APIVersion: networkingv1.SchemeGroupVersion.String(), Kind: "Ingress", Namespace: ingress.Namespace, Name: ingress.Name, UID: ingress.UID}
 	if !parsed.Enabled || len(parsed.Providers) == 0 {
-		return ctrl.Result{}, r.Output.Apply(ctx, identity, nil)
+		if err := r.Output.Apply(ctx, identity, nil); err != nil {
+			r.warning(&ingress, "DNSEndpointWriteFailed", err.Error())
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
 	}
 	projection, err := source.IngressProjection(&ingress, parsed.Hostnames, func(reason, message string) { r.warning(&ingress, reason, message) })
 	if err != nil {
@@ -83,7 +87,11 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, request ctrl.Request)
 		r.warning(&ingress, "ResolutionFailed", err.Error())
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, r.Output.Apply(ctx, identity, publications)
+	if err := r.Output.Apply(ctx, identity, publications); err != nil {
+		r.warning(&ingress, "DNSEndpointWriteFailed", err.Error())
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
 }
 
 func (r *IngressReconciler) ingressAnnotations(ctx context.Context, ingress *networkingv1.Ingress) (map[string]string, error) {
@@ -137,7 +145,11 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, request ctrl.Reques
 	}
 	identity := source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: "HTTPRoute", Namespace: route.Namespace, Name: route.Name, UID: route.UID}
 	if !parsed.Enabled || len(parsed.Providers) == 0 {
-		return ctrl.Result{}, r.Output.Apply(ctx, identity, nil)
+		if err := r.Output.Apply(ctx, identity, nil); err != nil {
+			r.warning(&route, "DNSEndpointWriteFailed", err.Error())
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
 	}
 	projection, err := source.HTTPRouteProjection(ctx, r.Client, &route, parsed.Hostnames, func(reason, message string) { r.warning(&route, reason, message) })
 	if err != nil {
@@ -155,7 +167,11 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, request ctrl.Reques
 		r.warning(&route, "ResolutionFailed", err.Error())
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, r.Output.Apply(ctx, identity, publications)
+	if err := r.Output.Apply(ctx, identity, publications); err != nil {
+		r.warning(&route, "DNSEndpointWriteFailed", err.Error())
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
 }
 
 func (r *HTTPRouteReconciler) routeAnnotations(ctx context.Context, route *gatewayv1.HTTPRoute) (map[string]string, error) {
@@ -200,6 +216,11 @@ func loadProviders(ctx context.Context, reader client.Reader, names []string) ([
 	for _, name := range names {
 		var provider labdnsv1alpha1.DNSProvider
 		if err := reader.Get(ctx, types.NamespacedName{Name: name}, &provider); err != nil {
+			if apierrors.IsNotFound(err) {
+				// A deleted profile is an authoritative deselection. The output layer
+				// retires only that profile's targets using its stored delay.
+				continue
+			}
 			return nil, fmt.Errorf("get DNSProvider %s: %w", name, err)
 		}
 		result = append(result, &provider)

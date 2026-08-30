@@ -46,7 +46,7 @@ import (
 
 	labdnsv1alpha1 "github.com/shednet/labdns/api/v1alpha1"
 	labdnscontroller "github.com/shednet/labdns/internal/controller"
-	"github.com/shednet/labdns/internal/source"
+	"github.com/shednet/labdns/internal/dnsendpoint"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -136,8 +136,13 @@ func main() {
 	}
 
 	// +kubebuilder:scaffold:builder
-	if err := labdnscontroller.Setup(context.Background(), mgr, source.DiscardOutput{}, enableGatewayAPI); err != nil {
+	output := dnsendpoint.NewWriter(mgr.GetClient())
+	if err := labdnscontroller.Setup(context.Background(), mgr, output, enableGatewayAPI); err != nil {
 		setupLog.Error(err, "unable to set up source controllers")
+		os.Exit(1)
+	}
+	if err := labdnscontroller.SetupLifecycle(mgr, output, enableGatewayAPI); err != nil {
+		setupLog.Error(err, "unable to set up DNSEndpoint lifecycle controller")
 		os.Exit(1)
 	}
 

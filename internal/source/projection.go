@@ -72,14 +72,10 @@ type Publication struct {
 	DeletionDelay       time.Duration
 }
 
-// Output is the Stage 2 boundary. DNSEndpoint is deliberately implemented in Stage 3.
+// Output is the provider-neutral boundary implemented by the DNSEndpoint writer.
 type Output interface {
 	Apply(context.Context, Identity, []Publication) error
 }
-
-type DiscardOutput struct{}
-
-func (DiscardOutput) Apply(context.Context, Identity, []Publication) error { return nil }
 
 type WarningFunc func(reason, message string)
 
