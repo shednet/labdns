@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- labdns_v1alpha1_dnsprovider.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

@@ -1,0 +1,9 @@
+apiVersion: labdns.shednet.dev/v1alpha1
+kind: DNSProvider
+metadata:
+  labels:
+    app.kubernetes.io/name: labdns
+    app.kubernetes.io/managed-by: kustomize
+  name: dnsprovider-sample
+spec:
+  {}
