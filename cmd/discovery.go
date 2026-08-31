@@ -27,11 +27,17 @@ type resourceDiscovery interface {
 	ServerResourcesForGroupVersion(string) (*metav1.APIResourceList, error)
 }
 
+const (
+	verbGet   = "get"
+	verbList  = "list"
+	verbWatch = "watch"
+)
+
 func checkPrerequisites(discovery resourceDiscovery, gatewayEnabled bool) error {
 	if err := requireResources(
 		discovery, "externaldns.k8s.io/v1alpha1", []requiredResource{{
 			Name: "dnsendpoints", Kind: "DNSEndpoint", Namespaced: true,
-			Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			Verbs: []string{verbGet, verbList, verbWatch, "create", "update", "patch", "delete"},
 		}},
 	); err != nil {
 		return fmt.Errorf(
@@ -41,16 +47,16 @@ func checkPrerequisites(discovery resourceDiscovery, gatewayEnabled bool) error 
 	}
 	if gatewayEnabled {
 		if err := requireResources(discovery, "gateway.networking.k8s.io/v1", []requiredResource{
-			{Name: "httproutes", Kind: "HTTPRoute", Namespaced: true, Verbs: []string{"get", "list", "watch"}},
-			{Name: "gateways", Kind: "Gateway", Namespaced: true, Verbs: []string{"get", "list", "watch"}},
-			{Name: "gatewayclasses", Kind: "GatewayClass", Namespaced: false, Verbs: []string{"get", "list", "watch"}},
+			{Name: "httproutes", Kind: "HTTPRoute", Namespaced: true, Verbs: []string{verbGet, verbList, verbWatch}},
+			{Name: "gateways", Kind: "Gateway", Namespaced: true, Verbs: []string{verbGet, verbList, verbWatch}},
+			{Name: "gatewayclasses", Kind: "GatewayClass", Namespaced: false, Verbs: []string{verbGet, verbList, verbWatch}},
 		}); err != nil {
 			return fmt.Errorf("gateway API support requested but v1 resources are unavailable: %w", err)
 		}
 		if err := requireResources(
 			discovery, "gateway.networking.k8s.io/v1beta1", []requiredResource{{
 				Name: "referencegrants", Kind: "ReferenceGrant", Namespaced: true,
-				Verbs: []string{"get", "list", "watch"},
+				Verbs: []string{verbGet, verbList, verbWatch},
 			}},
 		); err != nil {
 			return fmt.Errorf("gateway API support requested but ReferenceGrant is unavailable: %w", err)
