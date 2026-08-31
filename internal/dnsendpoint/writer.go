@@ -50,6 +50,7 @@ const (
 	DeletionDelayAnnotation   = source.AnnotationPrefix + "deletion-delay"
 	LifecycleAnnotation       = source.AnnotationPrefix + "lifecycle"
 	ManagedByValue            = "labdns"
+	dnsEndpointResource       = "dnsendpoints"
 	externalDNSPrefix         = "external-dns.alpha.kubernetes.io/"
 )
 
@@ -193,7 +194,7 @@ func (m *Writer) applyOne(ctx context.Context, identity source.Identity, provide
 				return buildErr
 			}
 			if err := m.Client.Create(ctx, created); apierrors.IsAlreadyExists(err) {
-				return apierrors.NewConflict(schema.GroupResource{Group: externaldnsv1alpha1.GroupVersion.Group, Resource: "dnsendpoints"}, key.Name, err)
+				return apierrors.NewConflict(schema.GroupResource{Group: externaldnsv1alpha1.GroupVersion.Group, Resource: dnsEndpointResource}, key.Name, err)
 			} else {
 				return err
 			}
