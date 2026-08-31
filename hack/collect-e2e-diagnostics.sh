@@ -42,7 +42,7 @@ if [[ ! -f "${kubeconfig}" ]]; then
   exit 1
 fi
 
-"${KIND:-bin/kind}" export logs --name "${KIND_CLUSTER}" "${E2E_DIAGNOSTICS_DIR}/kind" || true
+"${KIND:-kind}" export logs --name "${KIND_CLUSTER}" "${E2E_DIAGNOSTICS_DIR}/kind" || true
 kubectl --kubeconfig "${kubeconfig}" --context "${context}" get nodes -o wide >"${E2E_DIAGNOSTICS_DIR}/nodes.txt" 2>&1 || true
 kubectl --kubeconfig "${kubeconfig}" --context "${context}" get all,dnsproviders,dnsendpoints,endpointslices,ingresses -A -o yaml >"${E2E_DIAGNOSTICS_DIR}/objects.yaml" 2>&1 || true
 kubectl --kubeconfig "${kubeconfig}" --context "${context}" get events -A --sort-by=.lastTimestamp >"${E2E_DIAGNOSTICS_DIR}/events.txt" 2>&1 || true
