@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -35,6 +36,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -157,6 +159,7 @@ func TestManagerWatchGraphAndDNSProviderAdmission(t *testing.T) { //nolint:gocyc
 	if err != nil {
 		t.Fatal(err)
 	}
+	validateExamplesThroughAPI(t, ctx, direct)
 
 	tooLongName := &labdnsv1alpha1.DNSProvider{ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 32) + "." + strings.Repeat("b", 32)}, Spec: validProviderSpec()}
 	if err := direct.Create(ctx, tooLongName); err == nil || !apierrors.IsInvalid(err) {
@@ -508,6 +511,68 @@ func TestManagerWatchGraphAndDNSProviderAdmission(t *testing.T) { //nolint:gocyc
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("manager did not stop")
+	}
+}
+
+func validateExamplesThroughAPI(t *testing.T, ctx context.Context, kubeClient client.Client) {
+	t.Helper()
+	providersFile, err := os.Open(filepath.Join("..", "..", "examples", "dnsproviders.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := utilyaml.NewYAMLOrJSONDecoder(providersFile, 4096)
+	providers := []*labdnsv1alpha1.DNSProvider{}
+	for {
+		provider := &labdnsv1alpha1.DNSProvider{}
+		if err := decoder.Decode(provider); err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatalf("decode DNSProvider example: %v", err)
+		}
+		if provider.Name == "" {
+			continue
+		}
+		if err := kubeClient.Create(ctx, provider); err != nil {
+			t.Fatalf("DNSProvider example %q rejected by API admission: %v", provider.Name, err)
+		}
+		providers = append(providers, provider)
+	}
+	if len(providers) != 2 {
+		t.Fatalf("decoded %d DNSProvider examples, want 2", len(providers))
+	}
+	if err := providersFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ingressFile, err := os.Open(filepath.Join("..", "..", "examples", "ingress-split-horizon.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingress := &networkingv1.Ingress{}
+	if err := utilyaml.NewYAMLOrJSONDecoder(ingressFile, 4096).Decode(ingress); err != nil {
+		t.Fatalf("decode Ingress example through typed client: %v", err)
+	}
+	if err := ingressFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ingress.Namespace}}
+	if err := kubeClient.Create(ctx, namespace); err != nil {
+		t.Fatalf("create example namespace: %v", err)
+	}
+	if err := kubeClient.Create(ctx, ingress); err != nil {
+		t.Fatalf("Ingress example rejected by Kubernetes API: %v", err)
+	}
+	if err := kubeClient.Delete(ctx, ingress); err != nil {
+		t.Fatal(err)
+	}
+	for _, provider := range providers {
+		if err := kubeClient.Delete(ctx, provider); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := kubeClient.Delete(ctx, namespace); err != nil {
+		t.Fatal(err)
 	}
 }
 

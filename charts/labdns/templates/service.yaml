@@ -1,0 +1,16 @@
+{{- if .Values.metrics.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "labdns.fullname" . }}-metrics
+  labels:
+    {{- include "labdns.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "labdns.selectorLabels" . | nindent 4 }}
+  ports:
+  - name: {{ ternary "https" "http" .Values.metrics.secure }}
+    port: {{ .Values.metrics.port }}
+    targetPort: metrics
+    protocol: TCP
+{{- end }}

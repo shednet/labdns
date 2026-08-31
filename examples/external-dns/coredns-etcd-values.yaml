@@ -1,0 +1,42 @@
+# Values for external-dns/external-dns chart 1.21.1 (ExternalDNS v0.21.0).
+provider:
+  name: coredns
+sources:
+- crd
+policy: sync
+registry: txt
+txtOwnerId: labdns-vpn-example-com
+domainFilters:
+- example.com
+labelFilter: labdns.shednet.dev/provider=vpn
+triggerLoopOnEvent: true
+interval: 1m
+extraArgs:
+- --min-event-sync-interval=1s
+- --coredns-strictly-owned
+- --coredns-prefix=/skydns/
+env:
+- name: ETCD_URLS
+  value: https://etcd-vpn.dns-system.svc:2379
+- name: ETCD_USERNAME
+  valueFrom:
+    secretKeyRef: {name: external-dns-coredns-etcd, key: username}
+- name: ETCD_PASSWORD
+  valueFrom:
+    secretKeyRef: {name: external-dns-coredns-etcd, key: password}
+- name: ETCD_CA_FILE
+  value: /etc/external-dns/etcd/ca.crt
+- name: ETCD_CERT_FILE
+  value: /etc/external-dns/etcd/tls.crt
+- name: ETCD_KEY_FILE
+  value: /etc/external-dns/etcd/tls.key
+# Mount the separately managed TLS Secret with the chart's extraVolumes and
+# extraVolumeMounts values. labdns never receives access to this Secret.
+extraVolumes:
+- name: etcd-tls
+  secret:
+    secretName: external-dns-coredns-etcd-tls
+extraVolumeMounts:
+- name: etcd-tls
+  mountPath: /etc/external-dns/etcd
+  readOnly: true

@@ -1,0 +1,22 @@
+# Values for external-dns/external-dns chart 1.21.1 (ExternalDNS v0.21.0).
+provider:
+  name: cloudflare
+sources:
+- crd
+policy: sync
+registry: txt
+txtOwnerId: labdns-www-example-com
+domainFilters:
+- example.com
+labelFilter: labdns.shednet.dev/provider=www
+triggerLoopOnEvent: true
+interval: 1m
+extraArgs:
+- --min-event-sync-interval=1s
+env:
+- name: CF_API_TOKEN
+  valueFrom:
+    secretKeyRef:
+      # This Secret is separately managed; labdns neither creates nor reads it.
+      name: external-dns-cloudflare
+      key: api-token

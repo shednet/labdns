@@ -118,3 +118,13 @@ func deadline(value pendingTarget) time.Time {
 	parsed, _ := time.Parse(time.RFC3339Nano, value.Deadline)
 	return parsed
 }
+
+// PendingTargetCount validates persisted lifecycle state and reports its
+// pending target count for operational metrics.
+func PendingTargetCount(value string) (int, error) {
+	state, err := parseLifecycle(value)
+	if err != nil {
+		return 0, err
+	}
+	return len(state.Pending), nil
+}

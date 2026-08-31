@@ -44,6 +44,7 @@ type LifecycleReconciler struct {
 	Recorder       events.EventRecorder
 	Output         lifecycleOutput
 	GatewayEnabled bool
+	Metrics        *Metrics
 }
 
 const (
@@ -51,14 +52,26 @@ const (
 	sourceKindHTTPRoute = "HTTPRoute"
 )
 
-func (r *LifecycleReconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) {
+func (r *LifecycleReconciler) Reconcile(ctx context.Context, request ctrl.Request) (result ctrl.Result, reconcileErr error) {
+	started := time.Now()
+	defer func() { r.Metrics.Observe("lifecycle", started, reconcileErr) }()
+	metricKey := request.Namespace + "/" + request.Name
 	var object externaldnsv1alpha1.DNSEndpoint
 	if err := r.Get(ctx, request.NamespacedName, &object); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.Metrics.SetEndpoint(metricKey, false, 0)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if object.Labels[dnsendpoint.ManagedByLabel] != dnsendpoint.ManagedByValue {
+		r.Metrics.SetEndpoint(metricKey, false, 0)
 		return ctrl.Result{}, nil
 	}
+	pending, err := dnsendpoint.PendingTargetCount(object.Annotations[dnsendpoint.LifecycleAnnotation])
+	if err != nil {
+		return ctrl.Result{}, r.failure(&object, err)
+	}
+	r.Metrics.SetEndpoint(metricKey, true, pending)
 	identity := source.Identity{
 		Kind:      object.Annotations[dnsendpoint.SourceKindAnnotation],
 		Namespace: object.Annotations[dnsendpoint.SourceNamespaceAnnotation],
@@ -71,12 +84,12 @@ func (r *LifecycleReconciler) Reconcile(ctx context.Context, request ctrl.Reques
 	case sourceKindHTTPRoute:
 		identity.APIVersion = gatewayv1.GroupVersion.String()
 	default:
-		return r.failure(&object, fmt.Errorf("unsupported source kind %q", identity.Kind))
+		return ctrl.Result{}, r.failure(&object, fmt.Errorf("unsupported source kind %q", identity.Kind))
 	}
 	provider := object.Labels[dnsendpoint.ProviderLabel]
 	if identity.Namespace == "" || identity.Name == "" || identity.UID == "" || provider == "" || object.Namespace != identity.Namespace ||
 		object.Labels[dnsendpoint.SourceKeyLabel] != dnsendpoint.SourceKey(identity) || object.Name != dnsendpoint.ObjectName(identity, provider) {
-		return r.failure(&object, fmt.Errorf("inconsistent managed source identity metadata"))
+		return ctrl.Result{}, r.failure(&object, fmt.Errorf("inconsistent managed source identity metadata"))
 	}
 	retire := identity.Kind == sourceKindHTTPRoute && !r.GatewayEnabled
 	if !retire {
@@ -94,12 +107,12 @@ func (r *LifecycleReconciler) Reconcile(ctx context.Context, request ctrl.Reques
 	}
 	if retire {
 		if err := r.Output.Apply(ctx, identity, nil); err != nil {
-			return r.failure(&object, err)
+			return ctrl.Result{}, r.failure(&object, err)
 		}
 	}
 	next, err := r.Output.Advance(ctx, request.NamespacedName)
 	if err != nil {
-		return r.failure(&object, err)
+		return ctrl.Result{}, r.failure(&object, err)
 	}
 	return ctrl.Result{RequeueAfter: next}, nil
 }
@@ -122,9 +135,9 @@ func (r *LifecycleReconciler) source(ctx context.Context, identity source.Identi
 	return true, object.GetUID(), nil
 }
 
-func (r *LifecycleReconciler) failure(object client.Object, err error) (ctrl.Result, error) {
+func (r *LifecycleReconciler) failure(object client.Object, err error) error {
 	if r.Recorder != nil {
 		r.Recorder.Eventf(object, nil, "Warning", "LifecycleFailed", "Reconcile", "%s", err)
 	}
-	return ctrl.Result{}, err
+	return err
 }

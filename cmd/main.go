@@ -38,6 +38,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	externaldnsv1alpha1 "sigs.k8s.io/external-dns/apis/v1alpha1"
@@ -137,11 +138,12 @@ func main() {
 
 	// +kubebuilder:scaffold:builder
 	output := dnsendpoint.NewWriter(mgr.GetClient())
-	if err := labdnscontroller.Setup(context.Background(), mgr, output, enableGatewayAPI); err != nil {
+	operationalMetrics := labdnscontroller.NewMetrics(ctrlmetrics.Registry)
+	if err := labdnscontroller.Setup(context.Background(), mgr, output, enableGatewayAPI, operationalMetrics); err != nil {
 		setupLog.Error(err, "unable to set up source controllers")
 		os.Exit(1)
 	}
-	if err := labdnscontroller.SetupLifecycle(mgr, output, enableGatewayAPI); err != nil {
+	if err := labdnscontroller.SetupLifecycle(mgr, output, enableGatewayAPI, operationalMetrics); err != nil {
 		setupLog.Error(err, "unable to set up DNSEndpoint lifecycle controller")
 		os.Exit(1)
 	}

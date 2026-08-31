@@ -1,0 +1,46 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/shednet/labdns
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+
+leaderElection: true
+gatewayAPI:
+  enabled: false
+enableHTTP2: false
+logLevel: info
+
+health:
+  port: 8081
+
+metrics:
+  enabled: false
+  port: 8443
+  secure: true
+  certificate:
+    existingSecret: ""
+    mountPath: /var/run/labdns/metrics
+    certName: tls.crt
+    keyName: tls.key
+
+podAnnotations: {}
+podLabels: {}
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+nodeSelector: {}
+tolerations: []
+affinity: {}

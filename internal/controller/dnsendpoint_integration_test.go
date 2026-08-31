@@ -26,6 +26,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -34,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -56,6 +59,137 @@ type apiMutationClient struct {
 	deleteConflict bool
 	updates        int
 	deletes        int
+}
+
+func TestManagerRestartReconstructsMetricsFromInitialWatches(t *testing.T) {
+	environment := &envtest.Environment{CRDDirectoryPaths: []string{
+		filepath.Join("..", "..", "config", "crd", "bases"),
+		filepath.Join("..", "..", "test", "fixtures", "external-dns-v0.21.0"),
+	}, ErrorIfCRDPathMissing: true}
+	config, err := environment.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := environment.Stop(); err != nil {
+			t.Errorf("stop envtest: %v", err)
+		}
+	}()
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, labdnsv1alpha1.AddToScheme, externaldnsv1alpha1.AddToScheme} {
+		if err := add(scheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	direct, err := client.New(config, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "metrics-restart"}}
+	provider := &labdnsv1alpha1.DNSProvider{ObjectMeta: metav1.ObjectMeta{Name: "restart-www"}, Spec: labdnsv1alpha1.DNSProviderSpec{
+		Zones:     []labdnsv1alpha1.DNSZone{{Name: "example.com"}},
+		IPSources: labdnsv1alpha1.IPSources{IPv4: &labdnsv1alpha1.NodeLabelSource{NodeLabel: "example.test/public-ip"}},
+	}}
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: namespace.Name}, Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 80}}}}
+	ingress := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: namespace.Name, Annotations: map[string]string{
+		source.EnabledAnnotation: "true", source.ProvidersAnnotation: provider.Name,
+	}}, Spec: networkingv1.IngressSpec{Rules: []networkingv1.IngressRule{ingressRule("app.example.com", service.Name)}}}
+	for _, object := range []client.Object{namespace, provider, service, ingress} {
+		if err := direct.Create(ctx, object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := direct.Get(ctx, client.ObjectKeyFromObject(ingress), ingress); err != nil {
+		t.Fatal(err)
+	}
+	identity := source.Identity{APIVersion: networkingv1.SchemeGroupVersion.String(), Kind: "Ingress", Namespace: ingress.Namespace, Name: ingress.Name, UID: ingress.UID}
+	dnsObject := &externaldnsv1alpha1.DNSEndpoint{ObjectMeta: metav1.ObjectMeta{
+		Name: dnsendpoint.ObjectName(identity, provider.Name), Namespace: namespace.Name,
+		Labels: map[string]string{dnsendpoint.ManagedByLabel: dnsendpoint.ManagedByValue, dnsendpoint.ProviderLabel: provider.Name, dnsendpoint.SourceKeyLabel: dnsendpoint.SourceKey(identity)},
+		Annotations: map[string]string{
+			dnsendpoint.SourceKindAnnotation: "Ingress", dnsendpoint.SourceNamespaceAnnotation: namespace.Name,
+			dnsendpoint.SourceNameAnnotation: ingress.Name, dnsendpoint.SourceUIDAnnotation: string(ingress.UID),
+			dnsendpoint.DeletionDelayAnnotation: "1m0s",
+			dnsendpoint.LifecycleAnnotation:     `{"version":1,"pending":[{"dnsName":"app.example.com","recordType":"A","target":"192.0.2.10","deadline":"2099-01-01T00:00:00Z"}]}`,
+		},
+	}, Spec: externaldnsv1alpha1.DNSEndpointSpec{Endpoints: []*endpoint.Endpoint{{DNSName: "app.example.com", RecordType: "A", Targets: []string{"192.0.2.10"}, RecordTTL: 300}}}}
+	if err := direct.Create(ctx, dnsObject); err != nil {
+		t.Fatal(err)
+	}
+
+	start := func() (*Metrics, context.CancelFunc, <-chan error) {
+		registry := prometheus.NewRegistry()
+		metrics := NewMetrics(registry)
+		mgr, err := ctrl.NewManager(config, ctrl.Options{Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0", Controller: controllerconfig.Controller{SkipNameValidation: new(true)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		output := metricsLifecycleOutput{}
+		if err := Setup(context.Background(), mgr, output, false, metrics); err != nil {
+			t.Fatal(err)
+		}
+		if err := SetupLifecycle(mgr, output, false, metrics); err != nil {
+			t.Fatal(err)
+		}
+		managerContext, cancel := context.WithCancel(ctx)
+		done := make(chan error, 1)
+		go func() { done <- mgr.Start(managerContext) }()
+		if !mgr.GetCache().WaitForCacheSync(managerContext) {
+			t.Fatal("cache did not synchronize")
+		}
+		pollContext, pollCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer pollCancel()
+		if err := wait.PollUntilContextTimeout(pollContext, 20*time.Millisecond, 10*time.Second, true, func(context.Context) (bool, error) {
+			return testutil.ToFloat64(metrics.source.WithLabelValues("Ingress")) == 1 &&
+				testutil.ToFloat64(metrics.generated) == 1 && testutil.ToFloat64(metrics.pending) == 1, nil
+		}); err != nil {
+			t.Fatalf("initial watches did not reconstruct exact metrics: %v", err)
+		}
+		return metrics, cancel, done
+	}
+	stop := func(cancel context.CancelFunc, done <-chan error) {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("manager stopped: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("manager did not stop")
+		}
+	}
+
+	first, cancel, done := start()
+	assertGauge(t, first.source.WithLabelValues("Ingress"), 1)
+	assertGauge(t, first.generated, 1)
+	assertGauge(t, first.pending, 1)
+	var beforeIngress networkingv1.Ingress
+	var beforeEndpoint externaldnsv1alpha1.DNSEndpoint
+	if err := direct.Get(ctx, client.ObjectKeyFromObject(ingress), &beforeIngress); err != nil {
+		t.Fatal(err)
+	}
+	if err := direct.Get(ctx, client.ObjectKeyFromObject(dnsObject), &beforeEndpoint); err != nil {
+		t.Fatal(err)
+	}
+	stop(cancel, done)
+
+	second, cancel, done := start()
+	defer stop(cancel, done)
+	assertGauge(t, second.source.WithLabelValues("Ingress"), 1)
+	assertGauge(t, second.generated, 1)
+	assertGauge(t, second.pending, 1)
+	var afterIngress networkingv1.Ingress
+	var afterEndpoint externaldnsv1alpha1.DNSEndpoint
+	if err := direct.Get(ctx, client.ObjectKeyFromObject(ingress), &afterIngress); err != nil {
+		t.Fatal(err)
+	}
+	if err := direct.Get(ctx, client.ObjectKeyFromObject(dnsObject), &afterEndpoint); err != nil {
+		t.Fatal(err)
+	}
+	if beforeIngress.ResourceVersion != afterIngress.ResourceVersion || beforeEndpoint.ResourceVersion != afterEndpoint.ResourceVersion {
+		t.Fatal("metrics reconstruction mutated Kubernetes objects")
+	}
 }
 
 func (c *apiMutationClient) Update(ctx context.Context, object client.Object, options ...client.UpdateOption) error {

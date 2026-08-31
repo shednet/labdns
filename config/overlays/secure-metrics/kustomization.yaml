@@ -1,0 +1,24 @@
+resources:
+- ../../default
+- metrics_service.yaml
+- metrics_auth_role.yaml
+- metrics_auth_role_binding.yaml
+- metrics_reader_role.yaml
+
+patches:
+- target:
+    kind: Deployment
+    name: controller-manager
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --metrics-addr=:8443
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --metrics-secure=true
+    - op: add
+      path: /spec/template/spec/containers/0/ports/-
+      value:
+        name: metrics
+        containerPort: 8443
+        protocol: TCP

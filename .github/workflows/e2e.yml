@@ -1,0 +1,43 @@
+name: Isolated Kind E2E
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'e2e'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      KIND_CLUSTER: labdns-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+      E2E_INVOCATION_ID: github-${{ github.run_id }}-${{ github.run_attempt }}-e2e
+      E2E_DIAGNOSTICS_DIR: /tmp/kind-logs-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+    - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+      with:
+        go-version: 1.26.1
+        cache: true
+    - name: Run isolated dual-stack contract
+      env:
+        KIND_NODE_IMAGE: kindest/node:v1.35.0
+        E2E_KEEP_CLUSTER_ON_FAILURE: "true"
+      run: make test-e2e
+    - name: Collect diagnostics
+      if: failure()
+      run: |
+        bin/kind export logs --name "$KIND_CLUSTER" "$E2E_DIAGNOSTICS_DIR" || true
+    - name: Upload diagnostics
+      if: failure()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: kind-diagnostics
+        path: ${{ env.E2E_DIAGNOSTICS_DIR }}
+    - name: Cleanup
+      if: always()
+      run: make cleanup-test-e2e

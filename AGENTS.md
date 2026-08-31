@@ -26,16 +26,19 @@ must not be included in production manifests.
 - Preserve unrelated worktree changes.
 - Keep application logs on `log/slog`, bridged into controller-runtime's logr
   logger.
-- Do not add Helm packaging until the packaging stage.
+- Keep Helm and Kustomize renders equivalent at their architecture and RBAC
+  boundaries. Neither path may ship ExternalDNS or its DNSEndpoint CRD.
 
 ## Layout and checks
 
 - `api/v1alpha1`: DNSProvider API source and generated deepcopy code.
 - `cmd/main.go`: manager entry point and scaffold markers.
 - `config`: Kustomize sources and generated manifests.
+- `charts/labdns`: standalone labdns chart with no dependencies.
+- `examples`: logical provider and separately managed ExternalDNS examples.
 - `hack/boilerplate.go.txt`: generator copyright header.
 
-Run `make manifests generate build lint test verify-generated` before handing
-off changes. Tests that need Kubernetes must use this repository's pinned
+Run `make manifests generate build lint test verify-generated
+verify-packaging` before handing off changes. Tests that need Kubernetes must use this repository's pinned
 envtest assets or an explicitly isolated Kind cluster; never use a personal or
 shared cluster.

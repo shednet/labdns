@@ -1,0 +1,34 @@
+resources:
+- ../../default
+- metrics_service.yaml
+
+patches:
+- target:
+    kind: Deployment
+    name: controller-manager
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --metrics-addr=:8080
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --metrics-secure=false
+    - op: add
+      path: /spec/template/spec/containers/0/ports/-
+      value:
+        name: metrics
+        containerPort: 8080
+        protocol: TCP
+- target:
+    kind: Service
+    name: controller-manager-metrics-service
+  patch: |-
+    - op: replace
+      path: /spec/ports/0/name
+      value: http
+    - op: replace
+      path: /spec/ports/0/port
+      value: 8080
+    - op: replace
+      path: /spec/ports/0/targetPort
+      value: 8080

@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+    - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d3b9a0c70f9 # v3.6.0
+    - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+    - uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+      with:
+        context: .
+        push: true
+        platforms: linux/amd64,linux/arm64
+        tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+
+  helm:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+    - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+      with:
+        go-version: 1.26.1
+        cache: true
+    - name: Verify and package chart
+      run: |
+        make verify-packaging
+        version="${GITHUB_REF_NAME#v}"
+        bin/helm package charts/labdns --version "$version" --app-version "$GITHUB_REF_NAME" --destination dist
+    - name: Login to GHCR
+      run: echo "${{ secrets.GITHUB_TOKEN }}" | bin/helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+    - name: Push OCI chart
+      run: bin/helm push dist/labdns-*.tgz oci://ghcr.io/${{ github.repository_owner }}/charts

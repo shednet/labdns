@@ -22,12 +22,16 @@ jobs:
           go mod tidy
           git diff --exit-code -- go.mod go.sum
       - name: Verify formatting and generated artifacts
-        run: make verify-fmt verify-generated verify-artifacts
+        run: make verify-fmt verify-generated verify-artifacts verify-packaging
       - name: Vet
         run: make vet
       - name: Lint
         run: make lint
       - name: Test
         run: make test
+      - name: Vet and compile E2E-tagged packages
+        run: make verify-e2e-build
+      - name: Validate workflows
+        run: make verify-workflows
       - name: Build
         run: make build

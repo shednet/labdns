@@ -1,0 +1,13 @@
+resources:
+- ../../default
+- gateway_role.yaml
+- gateway_role_binding.yaml
+
+patches:
+- target:
+    kind: Deployment
+    name: controller-manager
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --enable-gateway-api

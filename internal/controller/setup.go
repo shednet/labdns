@@ -62,14 +62,18 @@ const (
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes;gateways;gatewayclasses;referencegrants,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
-func Setup(ctx context.Context, mgr manager.Manager, output source.Output, gatewayEnabled bool) error {
+func Setup(ctx context.Context, mgr manager.Manager, output source.Output, gatewayEnabled bool, observed ...*Metrics) error {
+	var metrics *Metrics
+	if len(observed) != 0 {
+		metrics = observed[0]
+	}
 	if err := addIndexes(ctx, mgr.GetFieldIndexer(), gatewayEnabled); err != nil {
 		return err
 	}
 	mapper := newMapper(mgr.GetClient(), gatewayEnabled)
 	// EnqueueRequestsFromMapFunc maps both ObjectOld and ObjectNew on updates.
 	// This is required for label, backend, Node-placement, and class reassignment changes.
-	ingress := &IngressReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Recorder: mgr.GetEventRecorder("labdns-ingress"), Output: output, Resolver: source.Resolver{Reader: mgr.GetClient()}}
+	ingress := &IngressReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Recorder: mgr.GetEventRecorder("labdns-ingress"), Output: output, Resolver: source.Resolver{Reader: mgr.GetClient()}, Metrics: metrics}
 	b := builder.ControllerManagedBy(mgr).Named("ingress-source").For(&networkingv1.Ingress{}).
 		Watches(&networkingv1.IngressClass{}, handler.EnqueueRequestsFromMapFunc(mapper.ingressClass)).
 		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(mapper.ingressService)).
@@ -83,7 +87,7 @@ func Setup(ctx context.Context, mgr manager.Manager, output source.Output, gatew
 	if !gatewayEnabled {
 		return nil
 	}
-	route := &HTTPRouteReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Recorder: mgr.GetEventRecorder("labdns-httproute"), Output: output, Resolver: source.Resolver{Reader: mgr.GetClient()}}
+	route := &HTTPRouteReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Recorder: mgr.GetEventRecorder("labdns-httproute"), Output: output, Resolver: source.Resolver{Reader: mgr.GetClient()}, Metrics: metrics}
 	return builder.ControllerManagedBy(mgr).Named("httproute-source").For(&gatewayv1.HTTPRoute{}).
 		Watches(&gatewayv1.Gateway{}, handler.EnqueueRequestsFromMapFunc(mapper.routeGateway)).
 		Watches(&gatewayv1.GatewayClass{}, handler.EnqueueRequestsFromMapFunc(mapper.routeGatewayClass)).
@@ -97,8 +101,12 @@ func Setup(ctx context.Context, mgr manager.Manager, output source.Output, gatew
 }
 
 // SetupLifecycle installs durable deadline recovery when the production output supports it.
-func SetupLifecycle(mgr manager.Manager, output lifecycleOutput, gatewayEnabled bool) error {
-	reconciler := &LifecycleReconciler{Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("labdns-lifecycle"), Output: output, GatewayEnabled: gatewayEnabled}
+func SetupLifecycle(mgr manager.Manager, output lifecycleOutput, gatewayEnabled bool, observed ...*Metrics) error {
+	var metrics *Metrics
+	if len(observed) != 0 {
+		metrics = observed[0]
+	}
+	reconciler := &LifecycleReconciler{Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("labdns-lifecycle"), Output: output, GatewayEnabled: gatewayEnabled, Metrics: metrics}
 	return builder.ControllerManagedBy(mgr).Named("dnsendpoint-lifecycle").For(&externaldnsv1alpha1.DNSEndpoint{}).Complete(reconciler)
 }
 

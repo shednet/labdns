@@ -1,0 +1,37 @@
+apiVersion: labdns.shednet.dev/v1alpha1
+kind: DNSProvider
+metadata:
+  name: www
+spec:
+  zones:
+  - name: example.com
+  ipSources:
+    ipv4:
+      nodeLabel: networking.example.com/public-ipv4
+    ipv6:
+      nodeLabel: networking.example.com/public-ipv6
+  recordDefaults:
+    ttl: 300
+    deletionDelay: 60s
+  providerSpecific:
+    defaults:
+    - name: external-dns.alpha.kubernetes.io/cloudflare-proxied
+      value: "false"
+    annotationKeys:
+    - external-dns.alpha.kubernetes.io/cloudflare-proxied
+---
+apiVersion: labdns.shednet.dev/v1alpha1
+kind: DNSProvider
+metadata:
+  name: vpn
+spec:
+  zones:
+  - name: example.com
+  ipSources:
+    ipv4:
+      nodeLabel: networking.example.com/vpn-ipv4
+    ipv6:
+      nodeLabel: networking.example.com/vpn-ipv6
+  recordDefaults:
+    ttl: 300
+    deletionDelay: 60s

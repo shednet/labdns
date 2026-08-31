@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "labdns.fullname" . }}
+  labels:
+    {{- include "labdns.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "labdns.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "labdns.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "labdns.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: manager
+        image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command: [/manager]
+        args:
+        - --health-addr=:{{ .Values.health.port }}
+        - --log-level={{ .Values.logLevel }}
+        {{- if .Values.leaderElection }}
+        - --leader-elect
+        {{- end }}
+        {{- if .Values.gatewayAPI.enabled }}
+        - --enable-gateway-api
+        {{- end }}
+        {{- if .Values.enableHTTP2 }}
+        - --enable-http2
+        {{- end }}
+        {{- if .Values.metrics.enabled }}
+        - --metrics-addr=:{{ .Values.metrics.port }}
+        - --metrics-secure={{ .Values.metrics.secure }}
+        {{- if and .Values.metrics.enabled .Values.metrics.secure .Values.metrics.certificate.existingSecret }}
+        - --metrics-cert-path={{ .Values.metrics.certificate.mountPath }}
+        - --metrics-cert-name={{ .Values.metrics.certificate.certName }}
+        - --metrics-cert-key={{ .Values.metrics.certificate.keyName }}
+        {{- end }}
+        {{- end }}
+        ports:
+        - name: health
+          containerPort: {{ .Values.health.port }}
+          protocol: TCP
+        {{- if .Values.metrics.enabled }}
+        - name: metrics
+          containerPort: {{ .Values.metrics.port }}
+          protocol: TCP
+        {{- end }}
+        livenessProbe:
+          httpGet: {path: /healthz, port: health}
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet: {path: /readyz, port: health}
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+          readOnlyRootFilesystem: true
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        {{- if and .Values.metrics.enabled .Values.metrics.secure .Values.metrics.certificate.existingSecret }}
+        volumeMounts:
+        - name: metrics-certificate
+          mountPath: {{ .Values.metrics.certificate.mountPath }}
+          readOnly: true
+        {{- end }}
+      {{- if and .Values.metrics.enabled .Values.metrics.secure .Values.metrics.certificate.existingSecret }}
+      volumes:
+      - name: metrics-certificate
+        secret:
+          secretName: {{ .Values.metrics.certificate.existingSecret }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 10

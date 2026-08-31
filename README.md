@@ -4,10 +4,15 @@ labdns is a Kubernetes operator that projects Ingress and Gateway API sources
 into ExternalDNS `DNSEndpoint` resources. ExternalDNS remains separately
 installed and is solely responsible for talking to DNS providers.
 
-This repository is a greenfield Kubebuilder v4 project. The controller and
-deployment documentation are introduced in later implementation stages; the
-current scaffold contains the cluster-scoped `DNSProvider` API and manager
-health/readiness endpoints.
+labdns never writes DNS providers directly and never reads provider Secrets.
+It resolves source backends through EndpointSlices and Node labels, then emits
+one durable DNSEndpoint per source and logical DNSProvider. Provider-label
+filters keep independently managed ExternalDNS deployments isolated.
+
+Start with the ordered [installation guide](docs/installation.md). See
+[configuration](docs/configuration.md) for flags, metrics, split-horizon
+isolation, and examples. Existing installations must follow the explicit
+[breaking upgrade procedure](docs/upgrade.md).
 
 ## Development
 
@@ -20,6 +25,7 @@ make build
 make lint
 make test
 make verify-generated
+make verify-packaging
 ```
 
 Generated CRDs, RBAC, and `zz_generated.*` files must be updated through the

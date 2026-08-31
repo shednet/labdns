@@ -1,0 +1,114 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "labdns.fullname" . }}
+  labels:
+    {{- include "labdns.labels" . | nindent 4 }}
+rules:
+- apiGroups: [labdns.shednet.dev]
+  resources: [dnsproviders]
+  verbs: [get, list, watch]
+- apiGroups: [externaldns.k8s.io]
+  resources: [dnsendpoints]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: [networking.k8s.io]
+  resources: [ingresses, ingressclasses]
+  verbs: [get, list, watch]
+- apiGroups: [""]
+  resources: [services, nodes]
+  verbs: [get, list, watch]
+- apiGroups: [discovery.k8s.io]
+  resources: [endpointslices]
+  verbs: [get, list, watch]
+- apiGroups: [events.k8s.io]
+  resources: [events]
+  verbs: [create, patch]
+{{- if .Values.gatewayAPI.enabled }}
+- apiGroups: [gateway.networking.k8s.io]
+  resources: [httproutes, gateways, gatewayclasses, referencegrants]
+  verbs: [get, list, watch]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "labdns.fullname" . }}
+  labels:
+    {{- include "labdns.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "labdns.fullname" . }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "labdns.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+{{- if .Values.leaderElection }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "labdns.fullname" . }}-leader-election
+  labels:
+    {{- include "labdns.labels" . | nindent 4 }}
+rules:
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "labdns.fullname" . }}-leader-election
+  labels:
+    {{- include "labdns.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "labdns.fullname" . }}-leader-election
+subjects:
+- kind: ServiceAccount
+  name: {{ include "labdns.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- if and .Values.metrics.enabled .Values.metrics.secure }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "labdns.fullname" . }}-metrics-auth
+  labels:
+    {{- include "labdns.labels" . | nindent 4 }}
+rules:
+- apiGroups: [authentication.k8s.io]
+  resources: [tokenreviews]
+  verbs: [create]
+- apiGroups: [authorization.k8s.io]
+  resources: [subjectaccessreviews]
+  verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "labdns.fullname" . }}-metrics-auth
+  labels:
+    {{- include "labdns.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "labdns.fullname" . }}-metrics-auth
+subjects:
+- kind: ServiceAccount
+  name: {{ include "labdns.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "labdns.fullname" . }}-metrics-reader
+  labels:
+    {{- include "labdns.labels" . | nindent 4 }}
+rules:
+- nonResourceURLs: [/metrics]
+  verbs: [get]
+{{- end }}

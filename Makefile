@@ -1,5 +1,5 @@
 # Image URL to use all building/pushing image targets
-IMG ?= controller:latest
+IMG ?= controller:dev
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -13,7 +13,8 @@ endif
 LOCALBIN ?= $(shell pwd)/bin
 GOCACHE ?= /tmp/labdns-next-go-build
 GOMODCACHE ?= /tmp/labdns-next-go-mod
-export GOCACHE GOMODCACHE
+GOLANGCI_LINT_CACHE ?= /tmp/labdns-next-golangci-lint
+export GOCACHE GOMODCACHE GOLANGCI_LINT_CACHE
 GO_TOOLCHAIN_VERSION ?= go1.26.1
 GO_TOOLCHAIN_ROOT := $(shell GOTOOLCHAIN=$(GO_TOOLCHAIN_VERSION) go env GOROOT)
 # The auto-downloaded toolchain can invoke `go tool` internally. Put its bin
@@ -89,34 +90,116 @@ verify-generated: ## Verify generated artifacts are synchronized.
 verify-artifacts: manifests kustomize ## Verify the Kustomize deployment renders.
 	@hack/verify-artifacts.sh
 
-# TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
-# The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
-# CertManager is installed by default; skip with:
-# - CERT_MANAGER_INSTALL_SKIP=true
-KIND_CLUSTER ?= labdns-test-e2e
+.PHONY: helm-sync
+helm-sync: manifests ## Synchronize the chart's generated DNSProvider CRD.
+	@mkdir -p charts/labdns/crds
+	@cp config/crd/bases/labdns.shednet.dev_dnsproviders.yaml charts/labdns/crds/labdns.shednet.dev_dnsproviders.yaml
+
+.PHONY: verify-packaging
+verify-packaging: manifests kustomize helm ## Verify Helm, Kustomize, examples, and install boundaries.
+	@HELM="$(HELM)" KUSTOMIZE="$(KUSTOMIZE)" hack/verify-packaging.sh
+
+.PHONY: verify-e2e-build
+verify-e2e-build: verify-e2e-safety ## Vet and compile all packages with the E2E build tag.
+	go vet -tags=e2e ./...
+	go test -tags=e2e ./... -run '^$$'
+
+.PHONY: verify-e2e-safety
+verify-e2e-safety: ## Verify isolated Kind naming, failure diagnostics, and guarded cleanup.
+	@hack/verify-e2e-safety.sh
+
+.PHONY: verify-workflows
+verify-workflows: actionlint ## Validate GitHub Actions workflow syntax and expressions.
+	"$(ACTIONLINT)"
+
+KIND_CLUSTER ?=
+E2E_INVOCATION_ID ?=
+KIND_NODE_IMAGE ?= kindest/node:v1.35.0
+KIND_CONFIG ?= test/e2e/kind.yaml
+E2E_KEEP_CLUSTER_ON_FAILURE ?= false
+E2E_DIAGNOSTICS_DIR ?=
+KIND_OWNERSHIP_FILE ?= /tmp/labdns-kind-owned-$(E2E_INVOCATION_ID)
+E2E_SUITE_GLOB ?= test/e2e/*_test.go
+E2E_TEST_COMMAND ?= go test -tags=e2e ./test/e2e/ -v -ginkgo.v
 
 .PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
-	@command -v $(KIND) >/dev/null 2>&1 || { \
-		echo "Kind is not installed. Please install Kind manually."; \
+setup-test-e2e: kind ## Create a fresh isolated dual-stack Kind cluster for E2E tests.
+	@test -n "$(KIND_CLUSTER)" && test -n "$(E2E_INVOCATION_ID)" || { \
+		echo "KIND_CLUSTER and E2E_INVOCATION_ID must identify this isolated invocation." >&2; \
 		exit 1; \
 	}
-	@case "$$($(KIND) get clusters)" in \
-		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
-		*) \
-			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
-	esac
+	@command -v $(KIND) >/dev/null 2>&1 || { \
+		echo "Kind is required; CI uses pinned Kind v0.30.0." >&2; \
+		exit 1; \
+	}
+	@if $(KIND) get clusters | grep -Fxq -- "$(KIND_CLUSTER)"; then \
+		echo "Refusing to reuse existing Kind cluster '$(KIND_CLUSTER)'. Choose a fresh KIND_CLUSTER name or clean it up explicitly." >&2; \
+		exit 1; \
+	fi
+	@rm -f "$(KIND_OWNERSHIP_FILE)"
+	@printf '%s\n%s\n' "$(E2E_INVOCATION_ID)" "$(KIND_CLUSTER)" >"$(KIND_OWNERSHIP_FILE)"
+	@echo "Creating fresh dual-stack Kind cluster '$(KIND_CLUSTER)'..."
+	@create_status=0; \
+	$(KIND) create cluster --name $(KIND_CLUSTER) --image $(KIND_NODE_IMAGE) --config $(KIND_CONFIG) || create_status=$$?; \
+	if [ $$create_status -ne 0 ]; then \
+		echo "Kind creation failed; cleaning up any partially created cluster '$(KIND_CLUSTER)'." >&2; \
+		$(MAKE) cleanup-test-e2e KIND_CLUSTER="$(KIND_CLUSTER)" E2E_INVOCATION_ID="$(E2E_INVOCATION_ID)" KIND_OWNERSHIP_FILE="$(KIND_OWNERSHIP_FILE)" || true; \
+		exit $$create_status; \
+	fi
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
-	$(MAKE) cleanup-test-e2e
+test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
+	@compgen -G '$(E2E_SUITE_GLOB)' >/dev/null || { echo "Stage 5 E2E suite is not present" >&2; exit 1; }
+	@invocation_id="$(E2E_INVOCATION_ID)"; \
+	if [ -z "$$invocation_id" ]; then invocation_id="$$(date -u +%Y%m%d%H%M%S)-$$$$-$${RANDOM}"; fi; \
+	cluster_name="$(KIND_CLUSTER)"; \
+	if [ -z "$$cluster_name" ]; then cluster_name="labdns-e2e-$$invocation_id"; fi; \
+	marker="$(KIND_OWNERSHIP_FILE)"; \
+	if [ -z "$(E2E_INVOCATION_ID)" ]; then marker="/tmp/labdns-kind-owned-$$invocation_id"; fi; \
+	diagnostics_dir="$(E2E_DIAGNOSTICS_DIR)"; \
+	if [ -z "$$diagnostics_dir" ]; then diagnostics_dir="/tmp/labdns-kind-logs-$$invocation_id"; fi; \
+	$(MAKE) setup-test-e2e KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id" KIND_OWNERSHIP_FILE="$$marker"; \
+	status=0; \
+	KIND=$(KIND) KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id" $(E2E_TEST_COMMAND) || status=$$?; \
+	if [ $$status -ne 0 ]; then \
+		echo "E2E failed; exporting diagnostics to $$diagnostics_dir" >&2; \
+		$(KIND) export logs --name "$$cluster_name" "$$diagnostics_dir" || true; \
+		if [ "$(E2E_KEEP_CLUSTER_ON_FAILURE)" = "true" ]; then \
+			echo "Preserving failed cluster for CI diagnostics; caller must delete $$cluster_name with invocation $$invocation_id." >&2; \
+		else \
+			$(MAKE) cleanup-test-e2e KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id" KIND_OWNERSHIP_FILE="$$marker" || true; \
+		fi; \
+		exit $$status; \
+	fi; \
+	$(MAKE) cleanup-test-e2e KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id" KIND_OWNERSHIP_FILE="$$marker"
 
 .PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
-	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+cleanup-test-e2e: kind ## Tear down the exact Kind cluster used for e2e tests.
+	@test -n "$(KIND_CLUSTER)" && test -n "$(E2E_INVOCATION_ID)" || { \
+		echo "KIND_CLUSTER and E2E_INVOCATION_ID are required for cleanup." >&2; \
+		exit 1; \
+	}
+	@if [ ! -f "$(KIND_OWNERSHIP_FILE)" ]; then \
+		if $(KIND) get clusters | grep -Fxq -- "$(KIND_CLUSTER)"; then \
+			echo "Refusing to delete cluster '$(KIND_CLUSTER)' without its invocation marker." >&2; \
+			exit 1; \
+		fi; \
+		echo "Kind cluster '$(KIND_CLUSTER)' is already absent."; \
+		exit 0; \
+	fi; \
+	marker_invocation="$$(sed -n '1p' "$(KIND_OWNERSHIP_FILE)")"; \
+	marker_cluster="$$(sed -n '2p' "$(KIND_OWNERSHIP_FILE)")"; \
+	if [ "$$marker_invocation" != "$(E2E_INVOCATION_ID)" ] || [ "$$marker_cluster" != "$(KIND_CLUSTER)" ]; then \
+		echo "Refusing cleanup: marker does not authorize invocation '$(E2E_INVOCATION_ID)' and cluster '$(KIND_CLUSTER)'." >&2; \
+		exit 1; \
+	fi; \
+	if ! $(KIND) get clusters | grep -Fxq -- "$(KIND_CLUSTER)"; then \
+		rm -f "$(KIND_OWNERSHIP_FILE)"; \
+		echo "Kind cluster '$(KIND_CLUSTER)' is already absent."; \
+		exit 0; \
+	fi; \
+	$(KIND) delete cluster --name $(KIND_CLUSTER); \
+	rm -f "$(KIND_OWNERSHIP_FILE)"
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -171,8 +254,14 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
 	mkdir -p dist
-	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
-	"$(KUSTOMIZE)" build config/default > dist/install.yaml
+	KUSTOMIZE="$(KUSTOMIZE)" hack/render-kustomize.sh "${IMG}" > dist/install.yaml
+
+.PHONY: helm-package
+helm-package: helm-sync helm ## Package the labdns Helm chart.
+	mkdir -p dist
+	"$(HELM)" dependency build charts/labdns
+	"$(HELM)" lint charts/labdns
+	"$(HELM)" package charts/labdns --destination dist
 
 ##@ Deployment
 
@@ -182,18 +271,17 @@ endif
 
 .PHONY: install
 install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
-	@out="$$( "$(KUSTOMIZE)" build config/crd 2>/dev/null || true )"; \
+	@out="$$( "$(KUSTOMIZE)" build config/crd )"; \
 	if [ -n "$$out" ]; then echo "$$out" | "$(KUBECTL)" apply -f -; else echo "No CRDs to install; skipping."; fi
 
 .PHONY: uninstall
 uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
-	@out="$$( "$(KUSTOMIZE)" build config/crd 2>/dev/null || true )"; \
+	@out="$$( "$(KUSTOMIZE)" build config/crd )"; \
 	if [ -n "$$out" ]; then echo "$$out" | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -; else echo "No CRDs to delete; skipping."; fi
 
 .PHONY: deploy
 deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
-	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" apply -f -
+	KUSTOMIZE="$(KUSTOMIZE)" hack/render-kustomize.sh "${IMG}" | "$(KUBECTL)" apply -f -
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
@@ -206,11 +294,13 @@ $(LOCALBIN):
 
 ## Tool Binaries
 KUBECTL ?= kubectl
-KIND ?= kind
+KIND ?= $(LOCALBIN)/kind
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+ACTIONLINT ?= $(LOCALBIN)/actionlint
+HELM ?= $(LOCALBIN)/helm
 KUBEBUILDER ?= $(LOCALBIN)/kubebuilder
 
 ## Tool Versions
@@ -225,6 +315,9 @@ ENVTEST_VERSION ?= v0.0.0-20260305142021-f9589b9f2b9d
 ENVTEST_K8S_VERSION ?= 1.35.0
 
 GOLANGCI_LINT_VERSION ?= v2.7.2
+ACTIONLINT_VERSION ?= v1.7.7
+HELM_VERSION ?= v3.20.2
+KIND_VERSION ?= v0.30.0
 
 .PHONY: kubebuilder
 kubebuilder: $(KUBEBUILDER) ## Download the pinned Kubebuilder CLI locally.
@@ -288,6 +381,63 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+
+.PHONY: actionlint
+actionlint: $(ACTIONLINT) ## Download the pinned GitHub Actions workflow linter locally.
+$(ACTIONLINT): $(LOCALBIN)
+	$(call go-install-tool,$(ACTIONLINT),github.com/rhysd/actionlint/cmd/actionlint,$(ACTIONLINT_VERSION))
+
+.PHONY: helm
+helm: $(HELM) ## Download the pinned Helm CLI locally.
+$(HELM): $(LOCALBIN)/helm-$(HELM_VERSION)
+	ln -sf "$$(realpath "$<")" "$@"
+$(LOCALBIN)/helm-$(HELM_VERSION): | $(LOCALBIN)
+	@set -e; \
+	os="$$(go env GOOS)"; arch="$$(go env GOARCH)"; \
+	case "$${os}/$${arch}" in \
+		linux/amd64) checksum="258e830a9e613c8a7a302d6059b4bb3b9758f2f3e1bb8ea0d707ce10a9a72fea" ;; \
+		linux/arm64) checksum="5ea2d6bc2cda3f8edf985e028809f5a9278f404fb8ab24044de9b7cb9b79a691" ;; \
+		darwin/amd64) checksum="7de04301f28b902a74f6286ed941cadc86ee5e6a9086a18f2ccf1f548e99d618" ;; \
+		darwin/arm64) checksum="139c794c22f16b579d08ddd3008c8038b9bb2814f35b5bcca91f50a1f458978d" ;; \
+		*) echo "No Helm $(HELM_VERSION) checksum is pinned for $${os}/$${arch}" >&2; exit 1 ;; \
+	esac; \
+	archive="$$(mktemp)"; extract="$$(mktemp -d)"; \
+	trap 'rm -f "$${archive}"; rm -rf "$${extract}"' EXIT; \
+	curl -fL "https://get.helm.sh/helm-$(HELM_VERSION)-$${os}-$${arch}.tar.gz" -o "$${archive}"; \
+	if command -v sha256sum >/dev/null 2>&1; then \
+		actual="$$(sha256sum "$${archive}" | awk '{print $$1}')"; \
+	else \
+		actual="$$(shasum -a 256 "$${archive}" | awk '{print $$1}')"; \
+	fi; \
+	[ "$${actual}" = "$${checksum}" ] || { echo "Helm checksum verification failed" >&2; exit 1; }; \
+	tar -xzf "$${archive}" -C "$${extract}"; \
+	install -m 0755 "$${extract}/$${os}-$${arch}/helm" "$@"
+
+.PHONY: kind
+kind: $(KIND) ## Download the pinned Kind CLI locally.
+$(KIND): $(LOCALBIN)/kind-$(KIND_VERSION)
+	ln -sf "$$(realpath "$<")" "$@"
+$(LOCALBIN)/kind-$(KIND_VERSION): | $(LOCALBIN)
+	@set -e; \
+	os="$$(go env GOOS)"; arch="$$(go env GOARCH)"; \
+	case "$${os}/$${arch}" in \
+		linux/amd64) checksum="517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889" ;; \
+		linux/arm64) checksum="7ea2de9d2d190022ed4a8a4e3ac0636c8a455e460b9a13ccf19f15d07f4f00eb" ;; \
+		darwin/amd64) checksum="4f0b6e3b88bdc66d922c08469f05ef507d4903dd236e6319199bb9c868eed274" ;; \
+		darwin/arm64) checksum="ceaf40df1d1551c481fb50e3deb5c3deecad5fd599df5469626b70ddf52a1518" ;; \
+		*) echo "No Kind $(KIND_VERSION) checksum is pinned for $${os}/$${arch}" >&2; exit 1 ;; \
+	esac; \
+	temporary="$@.tmp"; \
+	trap 'rm -f "$${temporary}"' EXIT; \
+	curl -fL "https://github.com/kubernetes-sigs/kind/releases/download/$(KIND_VERSION)/kind-$${os}-$${arch}" -o "$${temporary}"; \
+	if command -v sha256sum >/dev/null 2>&1; then \
+		actual="$$(sha256sum "$${temporary}" | awk '{print $$1}')"; \
+	else \
+		actual="$$(shasum -a 256 "$${temporary}" | awk '{print $$1}')"; \
+	fi; \
+	[ "$${actual}" = "$${checksum}" ] || { echo "Kind checksum verification failed" >&2; exit 1; }; \
+	chmod 0755 "$${temporary}"; \
+	mv "$${temporary}" "$@"
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary

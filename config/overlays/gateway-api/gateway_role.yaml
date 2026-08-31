@@ -1,0 +1,8 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gateway-reader
+rules:
+- apiGroups: [gateway.networking.k8s.io]
+  resources: [gatewayclasses, gateways, httproutes, referencegrants]
+  verbs: [get, list, watch]
