@@ -33,5 +33,7 @@ jobs:
         run: make verify-e2e-build
       - name: Validate workflows
         run: make verify-workflows
+      - name: Verify maintainer recipes
+        run: make verify-justfile
       - name: Build
         run: make build
