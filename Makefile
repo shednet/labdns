@@ -466,7 +466,9 @@ $(LOCALBIN)/helm-$(HELM_VERSION): | $(LOCALBIN)
 
 .PHONY: kind
 kind: $(KIND) ## Download the pinned Kind CLI locally.
-$(KIND): $(LOCALBIN)/kind-$(KIND_VERSION)
+# Maintain only the repository-default link. A caller-provided KIND is an
+# external executable and must never be replaced by this tool-install rule.
+$(LOCALBIN)/kind: $(LOCALBIN)/kind-$(KIND_VERSION)
 	ln -sf "$$(realpath "$<")" "$@"
 $(LOCALBIN)/kind-$(KIND_VERSION): | $(LOCALBIN)
 	@set -e; \
