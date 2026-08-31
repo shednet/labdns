@@ -2,8 +2,8 @@ apiVersion: v2
 name: labdns
 description: Project Kubernetes sources into ExternalDNS DNSEndpoints
 type: application
-version: 0.1.0
-appVersion: v0.1.0
+version: 0.0.0
+appVersion: v0.0.0
 kubeVersion: ">=1.35.0-0"
 annotations:
   external-dns-version: v0.21.0

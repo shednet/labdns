@@ -33,11 +33,11 @@ Install a fresh environment in this order:
 
    ```sh
    helm upgrade --install labdns oci://ghcr.io/shednet/charts/labdns \
-     --namespace labdns-system --create-namespace --version 0.1.0
+     --namespace labdns-system --create-namespace --version 0.0.1
    ```
 
    For source builds, use
-   `make build-installer IMG=ghcr.io/shednet/labdns:v0.1.0` and apply
+   `make build-installer IMG=ghcr.io/shednet/labdns:v0.0.1` and apply
    `dist/install.yaml`. Gateway API watches are opt-in with
    `gatewayAPI.enabled=true`; the Gateway API v1.5.1 CRDs must already exist.
 
