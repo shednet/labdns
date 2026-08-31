@@ -16,34 +16,35 @@ isolation, and examples. Existing installations must follow the explicit
 
 ## Development
 
-The project requires Go 1.26.1. All project tools are pinned and installed
-under `bin/` by the Makefile.
+The project requires Go 1.26.1 and Helm. Go-based build and test tools are
+installed under `bin/` by the Makefile; Helm must be available on `PATH`.
 
 ```sh
 make manifests generate
 make build
 make lint
 make test
-make verify-generated
-make verify-packaging
+make check-generated
+make check-packaging
 ```
 
 Generated CRDs, RBAC, and `zz_generated.*` files must be updated through the
 generator targets and never edited by hand.
 
-Maintainer and release recipes use the pinned `bin/just` command:
+Maintainer and release recipes require [`just`](https://just.systems/) to be
+installed separately and available on `PATH`:
 
 ```sh
-make just
-bin/just --list
-bin/just check
-bin/just release patch
+just --list
+just check
+just release patch
 ```
 
 `release` accepts `patch`, `minor`, or `major`. It verifies synchronized clean
 `main`, runs the complete non-live-E2E gate, updates the chart version, creates
 the release commit and annotated tag, then prompts once before pushing them.
 The separately listed `test-e2e` recipe is live and is never part of `check`.
+It also requires Kind to be installed separately and available on `PATH`.
 
 ## License
 
