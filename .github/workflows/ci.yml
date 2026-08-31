@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  checks:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -17,12 +17,12 @@ jobs:
         with:
           go-version: 1.26.1
           cache: true
-      - name: Verify module graph
+      - name: Check module graph
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
-      - name: Verify formatting and generated artifacts
-        run: make verify-fmt verify-generated verify-artifacts verify-packaging
+      - name: Check formatting, generated artifacts, and packaging
+        run: make lint-fmt check-generated check-packaging
       - name: Vet
         run: make vet
       - name: Lint
@@ -30,10 +30,8 @@ jobs:
       - name: Test
         run: make test
       - name: Vet and compile E2E-tagged packages
-        run: make verify-e2e-build
+        run: make build-e2e
       - name: Validate workflows
-        run: make verify-workflows
-      - name: Verify maintainer recipes
-        run: make verify-justfile
+        run: make lint-workflows
       - name: Build
         run: make build

@@ -30,7 +30,8 @@ tags:
     @git tag --list 'v[0-9]*' --sort=-v:refname
 
 # Run the complete non-live-E2E repository gate.
-check: lint test verify
+check: lint test
+    make lint-fmt vet check-generated check-packaging build-e2e lint-workflows build
     @echo 'All non-live-E2E checks passed.'
 
 # Run static analysis.
@@ -40,10 +41,6 @@ lint:
 # Run unit and envtest tests.
 test:
     make test
-
-# Verify source, generated output, packaging, workflows, build, and E2E-tagged compilation.
-verify:
-    make verify-fmt vet verify-generated verify-artifacts verify-packaging verify-e2e-build verify-workflows build
 
 # Require a completely clean worktree, including untracked files.
 clean-tree:
@@ -226,7 +223,7 @@ release bump="patch":
     if [[ "$reply" =~ ^[Yy]$ ]]; then
         "{{ just }}" push
     else
-        echo 'Push skipped. Run `bin/just push` after review.'
+        echo 'Push skipped. Run `just push` after review.'
     fi
 
 # Build the canonical controller image locally.
@@ -242,14 +239,14 @@ build-kind cluster:
     set -euo pipefail
     cluster='{{ cluster }}'
     [[ "$cluster" =~ ^labdns-e2e-[a-z0-9]([-a-z0-9]{0,50}[a-z0-9])?$ ]] || { echo 'Cluster must be an explicit labdns-e2e-* isolated cluster name.' >&2; exit 1; }
-    make kind
+    command -v kind >/dev/null || { echo 'Kind must be available on PATH.' >&2; exit 1; }
     mapfile -t markers < <(grep -lFx "$cluster" /tmp/labdns-kind-owned-* 2>/dev/null || true)
     [[ ${#markers[@]} -eq 1 && "$(sed -n '2p' "${markers[0]}")" == "$cluster" ]] || { echo 'Cluster lacks one unambiguous labdns invocation marker.' >&2; exit 1; }
-    bin/kind get clusters | grep -Fxq "$cluster" || { echo "Kind cluster $cluster does not exist." >&2; exit 1; }
+    kind get clusters | grep -Fxq "$cluster" || { echo "Kind cluster $cluster does not exist." >&2; exit 1; }
     version=$("{{ just }}" version)
     image="{{ image_repository }}:v$version"
     make docker-build IMG="$image"
-    bin/kind load docker-image "$image" --name "$cluster"
+    kind load docker-image "$image" --name "$cluster"
 
 # Run the live E2E suite in its isolated Kind environment.
 test-e2e:
