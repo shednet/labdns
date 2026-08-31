@@ -35,12 +35,12 @@ jobs:
       with:
         go-version: 1.26.1
         cache: true
-    - name: Verify and package chart
+    - name: Check and package chart
       run: |
-        make verify-packaging
+        make check-packaging
         version="${GITHUB_REF_NAME#v}"
-        bin/helm package charts/labdns --version "$version" --app-version "$GITHUB_REF_NAME" --destination dist
+        helm package charts/labdns --version "$version" --app-version "$GITHUB_REF_NAME" --destination dist
     - name: Login to GHCR
-      run: echo "${{ secrets.GITHUB_TOKEN }}" | bin/helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+      run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
     - name: Push OCI chart
-      run: bin/helm push dist/labdns-*.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
+      run: helm push dist/labdns-*.tgz oci://ghcr.io/${{ github.repository_owner }}/charts

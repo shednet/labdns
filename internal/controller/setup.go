@@ -463,13 +463,13 @@ func (m *mapper) list(ctx context.Context, description string, operation func(co
 	}
 }
 func (m *mapper) ingressEndpoint(_ context.Context, object client.Object) []reconcile.Request {
-	if object.GetAnnotations()[source.AnnotationPrefix+"source-kind"] != "Ingress" {
+	if object.GetAnnotations()[source.AnnotationPrefix+"source-kind"] != sourceKindIngress {
 		return nil
 	}
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: object.GetAnnotations()[source.AnnotationPrefix+"source-namespace"], Name: object.GetAnnotations()[source.AnnotationPrefix+"source-name"]}}}
 }
 func (m *mapper) routeEndpoint(_ context.Context, object client.Object) []reconcile.Request {
-	if object.GetAnnotations()[source.AnnotationPrefix+"source-kind"] != "HTTPRoute" {
+	if object.GetAnnotations()[source.AnnotationPrefix+"source-kind"] != sourceKindHTTPRoute {
 		return nil
 	}
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: object.GetAnnotations()[source.AnnotationPrefix+"source-namespace"], Name: object.GetAnnotations()[source.AnnotationPrefix+"source-name"]}}}
