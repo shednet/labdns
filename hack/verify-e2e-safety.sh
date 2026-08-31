@@ -107,6 +107,10 @@ cat >"$fake_kubectl" <<'EOF'
 printf '%s\n' "$*" >>"$FAKE_KUBECTL_LOG"
 EOF
 chmod 0755 "$fake_kind" "$fake_test" "$fake_docker" "$fake_kubectl"
+cp "$fake_kind" "$temporary/kind.expected"
+# Model a cold CI checkout where the pinned repository binary is downloaded
+# after this older fake. The Make tool rule must not replace caller-owned KIND.
+touch -t 200001010000 "$fake_kind"
 
 run_make() {
   PATH="$temporary:$PATH" KUBECONFIG="$ambient_kubeconfig" \
@@ -292,5 +296,7 @@ if grep -v '^--kubeconfig /tmp/labdns-kind-kubeconfig-diagnostic-invocation --co
 fi
 rm -f /tmp/labdns-kind-kubeconfig-diagnostic-invocation /tmp/labdns-kind-owned-diagnostic-invocation
 [[ "$(cat "$ambient_kubeconfig")" == ambient-sentinel ]]
+[[ ! -L "$fake_kind" ]]
+cmp "$temporary/kind.expected" "$fake_kind"
 
 echo "E2E isolation safety verification passed"
