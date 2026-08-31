@@ -55,8 +55,8 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, request ctrl.Request)
 	var ingress networkingv1.Ingress
 	if err := r.Get(ctx, request.NamespacedName, &ingress); err != nil {
 		if apierrors.IsNotFound(err) {
-			r.Metrics.SetSource("Ingress", metricKey, false)
-			return ctrl.Result{}, r.Output.Apply(ctx, source.Identity{APIVersion: networkingv1.SchemeGroupVersion.String(), Kind: "Ingress", Namespace: request.Namespace, Name: request.Name}, nil)
+			r.Metrics.SetSource(sourceKindIngress, metricKey, false)
+			return ctrl.Result{}, r.Output.Apply(ctx, source.Identity{APIVersion: networkingv1.SchemeGroupVersion.String(), Kind: sourceKindIngress, Namespace: request.Namespace, Name: request.Name}, nil)
 		}
 		return ctrl.Result{}, err
 	}
@@ -69,8 +69,8 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, request ctrl.Request)
 		r.warning(&ingress, "InvalidAnnotations", err.Error())
 		return ctrl.Result{}, err
 	}
-	identity := source.Identity{APIVersion: networkingv1.SchemeGroupVersion.String(), Kind: "Ingress", Namespace: ingress.Namespace, Name: ingress.Name, UID: ingress.UID}
-	r.Metrics.SetSource("Ingress", metricKey, parsed.Enabled && len(parsed.Providers) != 0)
+	identity := source.Identity{APIVersion: networkingv1.SchemeGroupVersion.String(), Kind: sourceKindIngress, Namespace: ingress.Namespace, Name: ingress.Name, UID: ingress.UID}
+	r.Metrics.SetSource(sourceKindIngress, metricKey, parsed.Enabled && len(parsed.Providers) != 0)
 	if !parsed.Enabled || len(parsed.Providers) == 0 {
 		if err := r.Output.Apply(ctx, identity, nil); err != nil {
 			r.warning(&ingress, "DNSEndpointWriteFailed", err.Error())
@@ -140,8 +140,8 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, request ctrl.Reques
 	var route gatewayv1.HTTPRoute
 	if err := r.Get(ctx, request.NamespacedName, &route); err != nil {
 		if apierrors.IsNotFound(err) {
-			r.Metrics.SetSource("HTTPRoute", metricKey, false)
-			return ctrl.Result{}, r.Output.Apply(ctx, source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: "HTTPRoute", Namespace: request.Namespace, Name: request.Name}, nil)
+			r.Metrics.SetSource(sourceKindHTTPRoute, metricKey, false)
+			return ctrl.Result{}, r.Output.Apply(ctx, source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: sourceKindHTTPRoute, Namespace: request.Namespace, Name: request.Name}, nil)
 		}
 		return ctrl.Result{}, err
 	}
@@ -155,8 +155,8 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, request ctrl.Reques
 		r.warning(&route, "InvalidAnnotations", err.Error())
 		return ctrl.Result{}, err
 	}
-	identity := source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: "HTTPRoute", Namespace: route.Namespace, Name: route.Name, UID: route.UID}
-	r.Metrics.SetSource("HTTPRoute", metricKey, parsed.Enabled && len(parsed.Providers) != 0)
+	identity := source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: sourceKindHTTPRoute, Namespace: route.Namespace, Name: route.Name, UID: route.UID}
+	r.Metrics.SetSource(sourceKindHTTPRoute, metricKey, parsed.Enabled && len(parsed.Providers) != 0)
 	if !parsed.Enabled || len(parsed.Providers) == 0 {
 		if err := r.Output.Apply(ctx, identity, nil); err != nil {
 			r.warning(&route, "DNSEndpointWriteFailed", err.Error())

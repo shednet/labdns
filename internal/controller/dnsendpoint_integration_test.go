@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -231,14 +230,10 @@ func (c *apiMutationClient) Delete(ctx context.Context, object client.Object, op
 
 func TestManagerDNSEndpointIsolationAndRestartRecovery(t *testing.T) { //nolint:gocyclo
 	const trueValue = "true"
-	moduleCache := os.Getenv("GOMODCACHE")
-	if moduleCache == "" {
-		t.Skip("GOMODCACHE is required for pinned fixtures")
-	}
 	environment := &envtest.Environment{CRDDirectoryPaths: []string{
 		filepath.Join("..", "..", "config", "crd", "bases"),
 		filepath.Join("..", "..", "test", "fixtures", "external-dns-v0.21.0"),
-		filepath.Join(moduleCache, "sigs.k8s.io", "gateway-api@v1.5.1", "config", "crd", "standard"),
+		gatewayAPICRDPath(t),
 	}, ErrorIfCRDPathMissing: true}
 	config, err := environment.Start()
 	if err != nil {

@@ -38,7 +38,7 @@ must not be included in production manifests.
 - `examples`: logical provider and separately managed ExternalDNS examples.
 - `hack/boilerplate.go.txt`: generator copyright header.
 
-Run `make manifests generate build lint test verify-generated
-verify-packaging` before handing off changes. Tests that need Kubernetes must use this repository's pinned
+Run `make manifests generate build lint test check-generated
+check-packaging` before handing off changes. Tests that need Kubernetes must use this repository's pinned
 envtest assets or an explicitly isolated Kind cluster; never use a personal or
 shared cluster.
