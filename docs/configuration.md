@@ -36,6 +36,26 @@ Metrics never contain source names or hostnames. Counts are reconstructed from
 initial cache watch events after manager startup and are not authoritative DNS
 state.
 
+## Node address labels
+
+IPv4 Node-label values are ordinary canonical literals, such as `192.0.2.10`.
+Kubernetes label values cannot contain colons, so IPv6 uses a reversible,
+label-safe form: prefix the canonical IPv6 text with `v6-` and replace every
+colon with a dash. For example, `2001:db8::10` becomes
+`v6-2001-db8--10`, and `::1` becomes `v6---1`.
+
+The `v6-` form is accepted only for an `ipSources.ipv6` label. An IPv6 source
+rejects a missing prefix, malformed or non-canonical encoding, IPv4, and
+IPv4-mapped IPv6. An IPv4 source rejects prefixed values and non-IPv4
+addresses. A nonempty invalid value aborts the complete source reconciliation;
+previously published output is preserved.
+
+```sh
+kubectl label node worker-1 \
+  networking.example.com/public-ipv4=192.0.2.10 \
+  networking.example.com/public-ipv6=v6-2001-db8--10
+```
+
 ## Publication isolation
 
 The `www` and `vpn` profiles in `examples/dnsproviders.yaml` can publish the

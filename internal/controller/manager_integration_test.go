@@ -260,6 +260,52 @@ func TestManagerWatchGraphAndDNSProviderAdmission(t *testing.T) { //nolint:gocyc
 	}
 	output.wait(t, "Ingress", "web", hostTargetsAre(map[string][]string{"app.example.com": {"192.0.2.1"}, "two.example.com": {"198.51.100.1"}}))
 
+	if err := direct.Get(ctx, client.ObjectKey{Name: "worker"}, node); err != nil {
+		t.Fatal(err)
+	}
+	node.Labels["network.example/ipv6"] = "v6-2001-db8--1"
+	if err := direct.Update(ctx, node); err != nil {
+		t.Fatalf("Kubernetes API rejected encoded IPv6 Node label: %v", err)
+	}
+	ipv6Provider := &labdnsv1alpha1.DNSProvider{ObjectMeta: metav1.ObjectMeta{Name: "encoded-v6"}, Spec: labdnsv1alpha1.DNSProviderSpec{Zones: []labdnsv1alpha1.DNSZone{{Name: "example.com"}}, IPSources: labdnsv1alpha1.IPSources{IPv6: &labdnsv1alpha1.NodeLabelSource{NodeLabel: "network.example/ipv6"}}}}
+	if err := direct.Create(ctx, ipv6Provider); err != nil {
+		t.Fatal(err)
+	}
+	ipv6Ingress := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Name: "ipv6", Namespace: "app", Annotations: map[string]string{source.EnabledAnnotation: "true", source.ProvidersAnnotation: "encoded-v6"}},
+		Spec:       networkingv1.IngressSpec{Rules: []networkingv1.IngressRule{ingressRule("ipv6.example.com", "api")}},
+	}
+	if err := direct.Create(ctx, ipv6Ingress); err != nil {
+		t.Fatal(err)
+	}
+	output.wait(t, "Ingress", "ipv6", func(publications []source.Publication) bool {
+		return len(publications) == 1 && len(publications[0].Records) == 1 && publications[0].Records[0].RecordType == "AAAA" && reflect.DeepEqual(publications[0].Records[0].Targets, []string{"2001:db8::1"})
+	})
+
+	ipv6StableOutput := &recordingOutput{}
+	ipv6Reconciler := &IngressReconciler{Client: direct, Output: ipv6StableOutput, Resolver: source.Resolver{Reader: direct}}
+	ipv6Request := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "app", Name: "ipv6"}}
+	if _, err := ipv6Reconciler.Reconcile(ctx, ipv6Request); err != nil {
+		t.Fatal(err)
+	}
+	if err := direct.Get(ctx, client.ObjectKey{Name: "worker"}, node); err != nil {
+		t.Fatal(err)
+	}
+	node.Labels["network.example/ipv6"] = "v6-2001-0db8--1"
+	if err := direct.Update(ctx, node); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ipv6Reconciler.Reconcile(ctx, ipv6Request); err == nil {
+		t.Fatal("noncanonical IPv6 Node label unexpectedly reconciled")
+	}
+	if ipv6StableOutput.calls != 1 {
+		t.Fatalf("invalid IPv6 label altered output: calls=%d", ipv6StableOutput.calls)
+	}
+	node.Labels["network.example/ipv6"] = "v6-2001-db8--1"
+	if err := direct.Update(ctx, node); err != nil {
+		t.Fatal(err)
+	}
+
 	stableOutput := &recordingOutput{}
 	directReconciler := &IngressReconciler{Client: direct, Output: stableOutput, Resolver: source.Resolver{Reader: direct}}
 	request := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "app", Name: "web"}}

@@ -9,6 +9,7 @@ spec:
     ipv4:
       nodeLabel: networking.example.com/public-ipv4
     ipv6:
+      # Node values encode 2001:db8::10 as v6-2001-db8--10.
       nodeLabel: networking.example.com/public-ipv6
   recordDefaults:
     ttl: 300

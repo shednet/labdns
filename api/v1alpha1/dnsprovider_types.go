@@ -32,7 +32,9 @@ type DNSProviderSpec struct {
 	// +listMapKey=name
 	Zones []DNSZone `json:"zones"`
 
-	// IPSources selects Node labels containing publishable addresses.
+	// IPSources selects Node labels containing publishable addresses. IPv4
+	// values are literals. IPv6 values use v6- followed by canonical IPv6 text
+	// with each colon replaced by a dash (for example, v6-2001-db8--10).
 	// +kubebuilder:validation:XValidation:rule="has(self.ipv4) || has(self.ipv6)",message="at least one of ipv4 or ipv6 is required"
 	IPSources IPSources `json:"ipSources"`
 

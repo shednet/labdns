@@ -5,6 +5,10 @@ The E2E suite must run only against the disposable Kind cluster created from
 workers. Never point these tests at a personal, shared, or pre-existing
 cluster. Cleanup must remove the entire named Kind cluster, even after failure,
 while preserving diagnostics long enough for CI artifact upload.
+These tests require a real Docker CLI and daemon. Keep
+`KIND_EXPERIMENTAL_PROVIDER=docker`; other Kind providers are rejected.
+Setup verifies Docker Engine identity fields rather than accepting a merely
+command-compatible runtime.
 Local runs export diagnostics and then clean up automatically. CI alone sets
 `E2E_KEEP_CLUSTER_ON_FAILURE=true` so its next workflow step can collect more
 diagnostics; the workflow's unconditional cleanup then deletes the exact named
@@ -24,6 +28,13 @@ marker proves authorization by this invocation, not the runtime identity of a
 cluster; safety therefore depends on the invariant that names and invocation
 IDs are unique and never reused. This prevents an old marker from authorizing
 standalone cleanup of a foreign same-name cluster.
+
+Each invocation uses `/tmp/labdns-kind-kubeconfig-<invocation-id>` and the
+exact `kind-<cluster-name>` context. Kind creation, the Go suite, Helm,
+kubectl, diagnostics, and controller-runtime must all bind both values rather
+than reading an ambient current context. Only marker-authorized cleanup may
+remove that deterministic kubeconfig, and a failed cluster deletion retains
+both files for recovery.
 
 ## Boundary under test
 
@@ -46,6 +57,8 @@ DNSEndpoint CRD is test setup, not a production labdns manifest.
 ## Assertion rules
 
 - Compare normalized A and AAAA answers as exact complete sets.
+- Store IPv6 Node-label values in the documented `v6-` label-safe encoding;
+  DNS and DNSEndpoint assertions must compare the decoded canonical address.
 - Assert exact ownership fields and provider-label isolation.
 - Reject every missing, extra, stale, foreign-provider, or duplicate target.
 - Exercise Node-label, EndpointSlice placement/readiness, delayed per-target

@@ -100,7 +100,7 @@ verify-packaging: manifests kustomize helm ## Verify Helm, Kustomize, examples, 
 	@HELM="$(HELM)" KUSTOMIZE="$(KUSTOMIZE)" hack/verify-packaging.sh
 
 .PHONY: verify-e2e-build
-verify-e2e-build: verify-e2e-safety ## Vet and compile all packages with the E2E build tag.
+verify-e2e-build: verify-e2e-safety verify-e2e-contract ## Vet and compile all packages with the E2E build tag.
 	go vet -tags=e2e ./...
 	go test -tags=e2e ./... -run '^$$'
 
@@ -108,98 +108,149 @@ verify-e2e-build: verify-e2e-safety ## Vet and compile all packages with the E2E
 verify-e2e-safety: ## Verify isolated Kind naming, failure diagnostics, and guarded cleanup.
 	@hack/verify-e2e-safety.sh
 
+.PHONY: verify-e2e-contract
+verify-e2e-contract: ## Verify the pinned, isolated, exact E2E publication contract.
+	@hack/verify-e2e-contract.sh
+
 .PHONY: verify-workflows
 verify-workflows: actionlint ## Validate GitHub Actions workflow syntax and expressions.
 	"$(ACTIONLINT)"
 
 KIND_CLUSTER ?=
 E2E_INVOCATION_ID ?=
+KIND_EXPERIMENTAL_PROVIDER ?= docker
 KIND_NODE_IMAGE ?= kindest/node:v1.35.0
 KIND_CONFIG ?= test/e2e/kind.yaml
 E2E_KEEP_CLUSTER_ON_FAILURE ?= false
 E2E_DIAGNOSTICS_DIR ?=
-KIND_OWNERSHIP_FILE ?= /tmp/labdns-kind-owned-$(E2E_INVOCATION_ID)
 E2E_SUITE_GLOB ?= test/e2e/*_test.go
-E2E_TEST_COMMAND ?= go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+E2E_TEST_COMMAND ?= go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout=8m
+export KIND_CLUSTER E2E_INVOCATION_ID KIND_EXPERIMENTAL_PROVIDER KIND_NODE_IMAGE KIND_CONFIG E2E_DIAGNOSTICS_DIR
 
 .PHONY: setup-test-e2e
 setup-test-e2e: kind ## Create a fresh isolated dual-stack Kind cluster for E2E tests.
-	@test -n "$(KIND_CLUSTER)" && test -n "$(E2E_INVOCATION_ID)" || { \
+	@test -n "$${KIND_CLUSTER}" && test -n "$${E2E_INVOCATION_ID}" || { \
 		echo "KIND_CLUSTER and E2E_INVOCATION_ID must identify this isolated invocation." >&2; \
 		exit 1; \
 	}
+	@[[ "$${E2E_INVOCATION_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$$ ]] || { \
+		echo "E2E_INVOCATION_ID must be a path-safe identifier of at most 128 characters." >&2; \
+		exit 1; \
+	}
+	@[[ "$${KIND_CLUSTER}" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$$ ]] || { \
+		echo "KIND_CLUSTER must be a lowercase Kind-compatible name of at most 63 characters." >&2; \
+		exit 1; \
+	}
+	@test "$${KIND_EXPERIMENTAL_PROVIDER}" = "docker" || { \
+		echo "E2E requires KIND_EXPERIMENTAL_PROVIDER=docker." >&2; \
+		exit 1; \
+	}
+	@docker_identity="$$(docker info --format '{{.DockerRootDir}}|{{.OSType}}|{{.Architecture}}|{{.ServerVersion}}' 2>/dev/null)" || { \
+		echo "E2E requires an available Docker Engine." >&2; \
+		exit 1; \
+	}; \
+	IFS='|' read -r docker_root docker_os docker_arch docker_version docker_extra <<<"$$docker_identity"; \
+	if [ -z "$$docker_root" ] || [ "$$docker_root" = '<no value>' ] || [ -z "$$docker_version" ] || [ "$$docker_version" = '<no value>' ] || [ -n "$$docker_extra" ]; then \
+		echo "E2E requires Docker Engine identity fields DockerRootDir and ServerVersion." >&2; \
+		exit 1; \
+	fi
 	@command -v $(KIND) >/dev/null 2>&1 || { \
 		echo "Kind is required; CI uses pinned Kind v0.30.0." >&2; \
 		exit 1; \
 	}
-	@if $(KIND) get clusters | grep -Fxq -- "$(KIND_CLUSTER)"; then \
-		echo "Refusing to reuse existing Kind cluster '$(KIND_CLUSTER)'. Choose a fresh KIND_CLUSTER name or clean it up explicitly." >&2; \
+	@clusters="$$( $(KIND) get clusters )" || { \
+		echo "Unable to list Kind clusters; refusing E2E setup." >&2; \
+		exit 1; \
+	}; \
+	if grep -Fxq -- "$${KIND_CLUSTER}" <<<"$$clusters"; then \
+		echo "Refusing to reuse existing Kind cluster '$${KIND_CLUSTER}'. Choose a fresh KIND_CLUSTER name or clean it up explicitly." >&2; \
 		exit 1; \
 	fi
-	@rm -f "$(KIND_OWNERSHIP_FILE)"
-	@printf '%s\n%s\n' "$(E2E_INVOCATION_ID)" "$(KIND_CLUSTER)" >"$(KIND_OWNERSHIP_FILE)"
-	@echo "Creating fresh dual-stack Kind cluster '$(KIND_CLUSTER)'..."
+	@if [ -e "/tmp/labdns-kind-kubeconfig-$${E2E_INVOCATION_ID}" ]; then \
+		echo "Refusing to overwrite the invocation kubeconfig '/tmp/labdns-kind-kubeconfig-$${E2E_INVOCATION_ID}'." >&2; \
+		exit 1; \
+	fi
+	@if [ -e "/tmp/labdns-kind-owned-$${E2E_INVOCATION_ID}" ]; then \
+		echo "Refusing to overwrite the invocation marker '/tmp/labdns-kind-owned-$${E2E_INVOCATION_ID}'." >&2; \
+		exit 1; \
+	fi
+	@printf '%s\n%s\n' "$${E2E_INVOCATION_ID}" "$${KIND_CLUSTER}" >"/tmp/labdns-kind-owned-$${E2E_INVOCATION_ID}"
+	@echo "Creating fresh dual-stack Kind cluster '$${KIND_CLUSTER}'..."
 	@create_status=0; \
-	$(KIND) create cluster --name $(KIND_CLUSTER) --image $(KIND_NODE_IMAGE) --config $(KIND_CONFIG) || create_status=$$?; \
+	$(KIND) create cluster --name "$${KIND_CLUSTER}" --image "$${KIND_NODE_IMAGE}" --config "$${KIND_CONFIG}" --kubeconfig "/tmp/labdns-kind-kubeconfig-$${E2E_INVOCATION_ID}" || create_status=$$?; \
 	if [ $$create_status -ne 0 ]; then \
-		echo "Kind creation failed; cleaning up any partially created cluster '$(KIND_CLUSTER)'." >&2; \
-		$(MAKE) cleanup-test-e2e KIND_CLUSTER="$(KIND_CLUSTER)" E2E_INVOCATION_ID="$(E2E_INVOCATION_ID)" KIND_OWNERSHIP_FILE="$(KIND_OWNERSHIP_FILE)" || true; \
+		echo "Kind creation failed; cleaning up any partially created cluster '$${KIND_CLUSTER}'." >&2; \
+		$(MAKE) cleanup-test-e2e KIND_CLUSTER="$${KIND_CLUSTER}" E2E_INVOCATION_ID="$${E2E_INVOCATION_ID}" || true; \
 		exit $$create_status; \
 	fi
 
 .PHONY: test-e2e
 test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
 	@compgen -G '$(E2E_SUITE_GLOB)' >/dev/null || { echo "Stage 5 E2E suite is not present" >&2; exit 1; }
-	@invocation_id="$(E2E_INVOCATION_ID)"; \
+	@invocation_id="$${E2E_INVOCATION_ID}"; \
 	if [ -z "$$invocation_id" ]; then invocation_id="$$(date -u +%Y%m%d%H%M%S)-$$$$-$${RANDOM}"; fi; \
-	cluster_name="$(KIND_CLUSTER)"; \
+	cluster_name="$${KIND_CLUSTER}"; \
 	if [ -z "$$cluster_name" ]; then cluster_name="labdns-e2e-$$invocation_id"; fi; \
-	marker="$(KIND_OWNERSHIP_FILE)"; \
-	if [ -z "$(E2E_INVOCATION_ID)" ]; then marker="/tmp/labdns-kind-owned-$$invocation_id"; fi; \
-	diagnostics_dir="$(E2E_DIAGNOSTICS_DIR)"; \
+	diagnostics_dir="$${E2E_DIAGNOSTICS_DIR}"; \
 	if [ -z "$$diagnostics_dir" ]; then diagnostics_dir="/tmp/labdns-kind-logs-$$invocation_id"; fi; \
-	$(MAKE) setup-test-e2e KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id" KIND_OWNERSHIP_FILE="$$marker"; \
+	kubeconfig="/tmp/labdns-kind-kubeconfig-$$invocation_id"; \
+	$(MAKE) setup-test-e2e KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id"; \
 	status=0; \
-	KIND=$(KIND) KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id" $(E2E_TEST_COMMAND) || status=$$?; \
+	KUBECONFIG="$$kubeconfig" KIND=$(KIND) KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id" $(E2E_TEST_COMMAND) || status=$$?; \
 	if [ $$status -ne 0 ]; then \
 		echo "E2E failed; exporting diagnostics to $$diagnostics_dir" >&2; \
-		$(KIND) export logs --name "$$cluster_name" "$$diagnostics_dir" || true; \
+		KIND="$(KIND)" KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id" E2E_DIAGNOSTICS_DIR="$$diagnostics_dir" hack/collect-e2e-diagnostics.sh || true; \
 		if [ "$(E2E_KEEP_CLUSTER_ON_FAILURE)" = "true" ]; then \
 			echo "Preserving failed cluster for CI diagnostics; caller must delete $$cluster_name with invocation $$invocation_id." >&2; \
 		else \
-			$(MAKE) cleanup-test-e2e KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id" KIND_OWNERSHIP_FILE="$$marker" || true; \
+			$(MAKE) cleanup-test-e2e KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id" || true; \
 		fi; \
 		exit $$status; \
 	fi; \
-	$(MAKE) cleanup-test-e2e KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id" KIND_OWNERSHIP_FILE="$$marker"
+	$(MAKE) cleanup-test-e2e KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id"
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: kind ## Tear down the exact Kind cluster used for e2e tests.
-	@test -n "$(KIND_CLUSTER)" && test -n "$(E2E_INVOCATION_ID)" || { \
+	@test -n "$${KIND_CLUSTER}" && test -n "$${E2E_INVOCATION_ID}" || { \
 		echo "KIND_CLUSTER and E2E_INVOCATION_ID are required for cleanup." >&2; \
 		exit 1; \
 	}
-	@if [ ! -f "$(KIND_OWNERSHIP_FILE)" ]; then \
-		if $(KIND) get clusters | grep -Fxq -- "$(KIND_CLUSTER)"; then \
-			echo "Refusing to delete cluster '$(KIND_CLUSTER)' without its invocation marker." >&2; \
+	@[[ "$${E2E_INVOCATION_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$$ ]] || { \
+		echo "E2E_INVOCATION_ID must be a path-safe identifier of at most 128 characters." >&2; \
+		exit 1; \
+	}
+	@[[ "$${KIND_CLUSTER}" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$$ ]] || { \
+		echo "KIND_CLUSTER must be a lowercase Kind-compatible name of at most 63 characters." >&2; \
+		exit 1; \
+	}
+	@clusters="$$( $(KIND) get clusters )" || { \
+		echo "Unable to list Kind clusters; retaining the invocation marker and kubeconfig." >&2; \
+		exit 1; \
+	}; \
+	if [ ! -f "/tmp/labdns-kind-owned-$${E2E_INVOCATION_ID}" ]; then \
+		if grep -Fxq -- "$${KIND_CLUSTER}" <<<"$$clusters"; then \
+			echo "Refusing to delete cluster '$${KIND_CLUSTER}' without its invocation marker." >&2; \
 			exit 1; \
 		fi; \
-		echo "Kind cluster '$(KIND_CLUSTER)' is already absent."; \
+		echo "Kind cluster '$${KIND_CLUSTER}' is already absent."; \
 		exit 0; \
 	fi; \
-	marker_invocation="$$(sed -n '1p' "$(KIND_OWNERSHIP_FILE)")"; \
-	marker_cluster="$$(sed -n '2p' "$(KIND_OWNERSHIP_FILE)")"; \
-	if [ "$$marker_invocation" != "$(E2E_INVOCATION_ID)" ] || [ "$$marker_cluster" != "$(KIND_CLUSTER)" ]; then \
-		echo "Refusing cleanup: marker does not authorize invocation '$(E2E_INVOCATION_ID)' and cluster '$(KIND_CLUSTER)'." >&2; \
+	marker_invocation="$$(sed -n '1p' "/tmp/labdns-kind-owned-$${E2E_INVOCATION_ID}")"; \
+	marker_cluster="$$(sed -n '2p' "/tmp/labdns-kind-owned-$${E2E_INVOCATION_ID}")"; \
+	if [ "$$marker_invocation" != "$${E2E_INVOCATION_ID}" ] || [ "$$marker_cluster" != "$${KIND_CLUSTER}" ]; then \
+		echo "Refusing cleanup: marker does not authorize invocation '$${E2E_INVOCATION_ID}' and cluster '$${KIND_CLUSTER}'." >&2; \
 		exit 1; \
 	fi; \
-	if ! $(KIND) get clusters | grep -Fxq -- "$(KIND_CLUSTER)"; then \
-		rm -f "$(KIND_OWNERSHIP_FILE)"; \
-		echo "Kind cluster '$(KIND_CLUSTER)' is already absent."; \
+	if ! grep -Fxq -- "$${KIND_CLUSTER}" <<<"$$clusters"; then \
+		rm -f "/tmp/labdns-kind-kubeconfig-$${E2E_INVOCATION_ID}" "/tmp/labdns-kind-owned-$${E2E_INVOCATION_ID}"; \
+		echo "Kind cluster '$${KIND_CLUSTER}' is already absent."; \
 		exit 0; \
 	fi; \
-	$(KIND) delete cluster --name $(KIND_CLUSTER); \
-	rm -f "$(KIND_OWNERSHIP_FILE)"
+	if ! $(KIND) delete cluster --name "$${KIND_CLUSTER}" --kubeconfig "/tmp/labdns-kind-kubeconfig-$${E2E_INVOCATION_ID}"; then \
+		echo "Kind cleanup failed; retaining the invocation marker and kubeconfig." >&2; \
+		exit 1; \
+	fi; \
+	rm -f "/tmp/labdns-kind-kubeconfig-$${E2E_INVOCATION_ID}" "/tmp/labdns-kind-owned-$${E2E_INVOCATION_ID}"
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

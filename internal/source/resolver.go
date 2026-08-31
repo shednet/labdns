@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -165,12 +166,9 @@ func (r Resolver) backendTargets(ctx context.Context, backend Backend, provider 
 			if value == "" {
 				continue
 			}
-			address, err := netip.ParseAddr(value)
+			address, err := parseNodeAddress(value, family)
 			if err != nil {
 				return nil, fmt.Errorf("node %s label %s contains invalid IP %q: %w", nodeName, label, value, err)
-			}
-			if family == IPv4 && !address.Is4() || family == IPv6 && !address.Is6() {
-				return nil, fmt.Errorf("node %s label %s address %q is not %s", nodeName, label, value, family)
 			}
 			result[family] = append(result[family], address.String())
 		}
@@ -179,6 +177,41 @@ func (r Resolver) backendTargets(ctx context.Context, backend Backend, provider 
 		result[family] = sortedUnique(result[family])
 	}
 	return result, nil
+}
+
+func parseNodeAddress(value string, family AddressFamily) (netip.Addr, error) {
+	if family == IPv4 {
+		if strings.HasPrefix(value, "v6-") {
+			return netip.Addr{}, fmt.Errorf("IPv4 values must not use the v6- prefix")
+		}
+		address, err := netip.ParseAddr(value)
+		if err != nil {
+			return netip.Addr{}, err
+		}
+		if !address.Is4() {
+			return netip.Addr{}, fmt.Errorf("address is not ipv4")
+		}
+		return address, nil
+	}
+	if family != IPv6 {
+		return netip.Addr{}, fmt.Errorf("unsupported address family %q", family)
+	}
+	if !strings.HasPrefix(value, "v6-") {
+		return netip.Addr{}, fmt.Errorf("IPv6 values must use the v6- prefix")
+	}
+	decoded := strings.ReplaceAll(strings.TrimPrefix(value, "v6-"), "-", ":")
+	address, err := netip.ParseAddr(decoded)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	if !address.Is6() || address.Is4In6() {
+		return netip.Addr{}, fmt.Errorf("address is not ipv6")
+	}
+	canonical := "v6-" + strings.ReplaceAll(address.String(), ":", "-")
+	if value != canonical {
+		return netip.Addr{}, fmt.Errorf("IPv6 value is not canonical; use %q", canonical)
+	}
+	return address, nil
 }
 
 func labelFor(provider *labdnsv1alpha1.DNSProvider, family AddressFamily) string {

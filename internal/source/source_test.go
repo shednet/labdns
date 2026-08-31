@@ -172,8 +172,8 @@ func TestResolverUsesReadyEndpointNodesAndNodeLabels(t *testing.T) {
 	ready, notReady := true, false
 	objects := []runtime.Object{
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "app"}},
-		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "one", Labels: map[string]string{"example.test/v4": "192.0.2.2", "example.test/v6": "2001:db8::2"}}},
-		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "two", Labels: map[string]string{"example.test/v4": "192.0.2.1", "example.test/v6": "2001:db8::1"}}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "one", Labels: map[string]string{"example.test/v4": "192.0.2.2", "example.test/v6": "v6-2001-db8--2"}}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "two", Labels: map[string]string{"example.test/v4": "192.0.2.1", "example.test/v6": "v6-2001-db8--1"}}},
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "ignored", Labels: map[string]string{"example.test/v4": "192.0.2.9"}}},
 		&discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "app", Labels: map[string]string{discoveryv1.LabelServiceName: "api"}}, AddressType: discoveryv1.AddressTypeIPv4, Endpoints: []discoveryv1.Endpoint{{NodeName: &one}, {NodeName: &two, Conditions: discoveryv1.EndpointConditions{Ready: &ready}}, {NodeName: &ignored, Conditions: discoveryv1.EndpointConditions{Ready: &notReady}}}},
 	}
@@ -191,6 +191,43 @@ func TestResolverUsesReadyEndpointNodesAndNodeLabels(t *testing.T) {
 	}
 	if got := pubs[0].Records[1].Targets; len(got) != 2 || got[0] != "2001:db8::1" || got[1] != "2001:db8::2" {
 		t.Fatalf("AAAA targets %#v", got)
+	}
+}
+
+func TestParseNodeAddressEncodingAndFamilyValidation(t *testing.T) {
+	for name, test := range map[string]struct {
+		value  string
+		family AddressFamily
+		want   string
+		valid  bool
+	}{
+		"ipv4":                    {value: "192.0.2.1", family: IPv4, want: "192.0.2.1", valid: true},
+		"ipv6":                    {value: "v6-2001-db8--10", family: IPv6, want: "2001:db8::10", valid: true},
+		"ipv6-loopback":           {value: "v6---1", family: IPv6, want: "::1", valid: true},
+		"ipv6-missing-prefix":     {value: "2001-db8--10", family: IPv6},
+		"ipv6-literal":            {value: "2001:db8::10", family: IPv6},
+		"ipv6-malformed":          {value: "v6-2001-db8---10", family: IPv6},
+		"ipv6-noncanonical":       {value: "v6-2001-0db8--10", family: IPv6},
+		"ipv6-encoded-ipv4":       {value: "v6-192.0.2.1", family: IPv6},
+		"ipv4-prefixed":           {value: "v6-192.0.2.1", family: IPv4},
+		"ipv4-wrong-family":       {value: "2001:db8::10", family: IPv4},
+		"ipv4-mapped-ipv6-source": {value: "v6---ffff-192.0.2.1", family: IPv6},
+	} {
+		t.Run(name, func(t *testing.T) {
+			address, err := parseNodeAddress(test.value, test.family)
+			if !test.valid {
+				if err == nil {
+					t.Fatalf("parseNodeAddress(%q, %s) = %s, want error", test.value, test.family, address)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if address.String() != test.want {
+				t.Fatalf("parseNodeAddress(%q, %s) = %s, want %s", test.value, test.family, address, test.want)
+			}
+		})
 	}
 }
 

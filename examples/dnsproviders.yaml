@@ -9,6 +9,7 @@ spec:
     ipv4:
       nodeLabel: networking.example.com/public-ipv4
     ipv6:
+      # Values use v6- plus canonical IPv6 text with ':' replaced by '-'.
       nodeLabel: networking.example.com/public-ipv6
   recordDefaults:
     ttl: 300
@@ -31,6 +32,7 @@ spec:
     ipv4:
       nodeLabel: networking.example.com/vpn-ipv4
     ipv6:
+      # For example, 2001:db8:2::10 is stored as v6-2001-db8-2--10.
       nodeLabel: networking.example.com/vpn-ipv6
   recordDefaults:
     ttl: 300

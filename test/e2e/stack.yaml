@@ -1,0 +1,367 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: labdns-e2e-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: external-dns
+  namespace: labdns-e2e-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: labdns-e2e-external-dns
+rules:
+- apiGroups: [externaldns.k8s.io]
+  resources: [dnsendpoints]
+  verbs: [get, list, watch]
+- apiGroups: [externaldns.k8s.io]
+  resources: [dnsendpoints/status]
+  verbs: [get, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: labdns-e2e-external-dns
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: labdns-e2e-external-dns
+subjects:
+- kind: ServiceAccount
+  name: external-dns
+  namespace: labdns-e2e-system
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd-www
+  namespace: labdns-e2e-system
+spec:
+  clusterIP: None
+  selector: {app: etcd-www}
+  ports:
+  - {name: client, port: 2379, targetPort: 2379}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: etcd-www
+  namespace: labdns-e2e-system
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: etcd-www}
+  template:
+    metadata:
+      labels: {app: etcd-www, labdns-e2e-role: etcd}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels: {labdns-e2e-role: etcd}
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: etcd
+        image: registry.k8s.io/etcd:3.5.21-0
+        command: [/usr/local/bin/etcd]
+        args:
+        - --name=www
+        - --data-dir=/var/lib/etcd
+        - --listen-client-urls=http://0.0.0.0:2379
+        - --advertise-client-urls=http://$(HOST_IP):2379
+        - --listen-peer-urls=http://127.0.0.1:2380
+        env:
+        - name: HOST_IP
+          valueFrom:
+            fieldRef: {fieldPath: status.hostIP}
+        readinessProbe:
+          tcpSocket: {port: 2379}
+        volumeMounts:
+        - {name: data, mountPath: /var/lib/etcd}
+      volumes:
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd-vpn
+  namespace: labdns-e2e-system
+spec:
+  clusterIP: None
+  selector: {app: etcd-vpn}
+  ports:
+  - {name: client, port: 2379, targetPort: 2379}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: etcd-vpn
+  namespace: labdns-e2e-system
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: etcd-vpn}
+  template:
+    metadata:
+      labels: {app: etcd-vpn, labdns-e2e-role: etcd}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels: {labdns-e2e-role: etcd}
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: etcd
+        image: registry.k8s.io/etcd:3.5.21-0
+        command: [/usr/local/bin/etcd]
+        args:
+        - --name=vpn
+        - --data-dir=/var/lib/etcd
+        - --listen-client-urls=http://0.0.0.0:2379
+        - --advertise-client-urls=http://$(HOST_IP):2379
+        - --listen-peer-urls=http://127.0.0.1:2380
+        env:
+        - name: HOST_IP
+          valueFrom:
+            fieldRef: {fieldPath: status.hostIP}
+        readinessProbe:
+          tcpSocket: {port: 2379}
+        volumeMounts:
+        - {name: data, mountPath: /var/lib/etcd}
+      volumes:
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-www
+  namespace: labdns-e2e-system
+data:
+  Corefile: |
+    e2e.example.test:53 {
+      errors
+      health
+      ready
+      etcd e2e.example.test {
+        path /skydns
+        endpoint http://{$ETCD_HOST}:2379
+      }
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-vpn
+  namespace: labdns-e2e-system
+data:
+  Corefile: |
+    e2e.example.test:53 {
+      errors
+      health
+      ready
+      etcd e2e.example.test {
+        path /skydns
+        endpoint http://{$ETCD_HOST}:2379
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coredns-www
+  namespace: labdns-e2e-system
+spec:
+  selector: {app: coredns-www}
+  ports:
+  - {name: dns-udp, port: 53, protocol: UDP, targetPort: 53}
+  - {name: dns-tcp, port: 53, protocol: TCP, targetPort: 53}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coredns-www
+  namespace: labdns-e2e-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: coredns-www}
+  template:
+    metadata:
+      labels: {app: coredns-www}
+    spec:
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels: {app: etcd-www}
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: coredns
+        image: registry.k8s.io/coredns/coredns:v1.12.1
+        args: [-conf, /etc/coredns/Corefile]
+        env:
+        - name: ETCD_HOST
+          valueFrom:
+            fieldRef: {fieldPath: status.hostIP}
+        ports:
+        - {containerPort: 53, protocol: UDP}
+        - {containerPort: 53, protocol: TCP}
+        readinessProbe:
+          httpGet: {path: /ready, port: 8181}
+        volumeMounts:
+        - {name: config, mountPath: /etc/coredns, readOnly: true}
+      volumes:
+      - name: config
+        configMap: {name: coredns-www}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coredns-vpn
+  namespace: labdns-e2e-system
+spec:
+  selector: {app: coredns-vpn}
+  ports:
+  - {name: dns-udp, port: 53, protocol: UDP, targetPort: 53}
+  - {name: dns-tcp, port: 53, protocol: TCP, targetPort: 53}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coredns-vpn
+  namespace: labdns-e2e-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: coredns-vpn}
+  template:
+    metadata:
+      labels: {app: coredns-vpn}
+    spec:
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels: {app: etcd-vpn}
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: coredns
+        image: registry.k8s.io/coredns/coredns:v1.12.1
+        args: [-conf, /etc/coredns/Corefile]
+        env:
+        - name: ETCD_HOST
+          valueFrom:
+            fieldRef: {fieldPath: status.hostIP}
+        ports:
+        - {containerPort: 53, protocol: UDP}
+        - {containerPort: 53, protocol: TCP}
+        readinessProbe:
+          httpGet: {path: /ready, port: 8181}
+        volumeMounts:
+        - {name: config, mountPath: /etc/coredns, readOnly: true}
+      volumes:
+      - name: config
+        configMap: {name: coredns-vpn}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-dns-www
+  namespace: labdns-e2e-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: external-dns-www}
+  template:
+    metadata:
+      labels: {app: external-dns-www}
+    spec:
+      serviceAccountName: external-dns
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels: {app: etcd-www}
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: external-dns
+        image: registry.k8s.io/external-dns/external-dns:v0.21.0
+        args:
+        - --source=crd
+        - --provider=coredns
+        - --policy=sync
+        - --registry=txt
+        - --events
+        - --interval=1m
+        - --min-event-sync-interval=1s
+        - --domain-filter=e2e.example.test
+        - --label-filter=labdns.shednet.dev/provider=www
+        - --txt-owner-id=labdns-e2e-www
+        - --coredns-strictly-owned
+        - --coredns-prefix=/skydns/
+        env:
+        - name: ETCD_HOST
+          valueFrom:
+            fieldRef: {fieldPath: status.hostIP}
+        - name: ETCD_URLS
+          value: http://$(ETCD_HOST):2379
+        readinessProbe:
+          httpGet: {path: /healthz, port: 7979}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-dns-vpn
+  namespace: labdns-e2e-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: external-dns-vpn}
+  template:
+    metadata:
+      labels: {app: external-dns-vpn}
+    spec:
+      serviceAccountName: external-dns
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels: {app: etcd-vpn}
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: external-dns
+        image: registry.k8s.io/external-dns/external-dns:v0.21.0
+        args:
+        - --source=crd
+        - --provider=coredns
+        - --policy=sync
+        - --registry=txt
+        - --events
+        - --interval=1m
+        - --min-event-sync-interval=1s
+        - --domain-filter=e2e.example.test
+        - --label-filter=labdns.shednet.dev/provider=vpn
+        - --txt-owner-id=labdns-e2e-vpn
+        - --coredns-strictly-owned
+        - --coredns-prefix=/skydns/
+        env:
+        - name: ETCD_HOST
+          valueFrom:
+            fieldRef: {fieldPath: status.hostIP}
+        - name: ETCD_URLS
+          value: http://$(ETCD_HOST):2379
+        readinessProbe:
+          httpGet: {path: /healthz, port: 7979}

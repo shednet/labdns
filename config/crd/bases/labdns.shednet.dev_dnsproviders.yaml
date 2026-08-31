@@ -40,8 +40,10 @@ spec:
             description: spec defines the desired state of DNSProvider
             properties:
               ipSources:
-                description: IPSources selects Node labels containing publishable
-                  addresses.
+                description: |-
+                  IPSources selects Node labels containing publishable addresses. IPv4
+                  values are literals. IPv6 values use v6- followed by canonical IPv6 text
+                  with each colon replaced by a dash (for example, v6-2001-db8--10).
                 properties:
                   ipv4:
                     properties:

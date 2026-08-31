@@ -17,6 +17,8 @@ jobs:
       KIND_CLUSTER: labdns-e2e-${{ github.run_id }}-${{ github.run_attempt }}
       E2E_INVOCATION_ID: github-${{ github.run_id }}-${{ github.run_attempt }}-e2e
       E2E_DIAGNOSTICS_DIR: /tmp/kind-logs-${{ github.run_id }}-${{ github.run_attempt }}
+      KUBECONFIG: /tmp/labdns-kind-kubeconfig-github-${{ github.run_id }}-${{ github.run_attempt }}-e2e
+      KIND_EXPERIMENTAL_PROVIDER: docker
     steps:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
     - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
@@ -30,8 +32,7 @@ jobs:
       run: make test-e2e
     - name: Collect diagnostics
       if: failure()
-      run: |
-        bin/kind export logs --name "$KIND_CLUSTER" "$E2E_DIAGNOSTICS_DIR" || true
+      run: hack/collect-e2e-diagnostics.sh || true
     - name: Upload diagnostics
       if: failure()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
