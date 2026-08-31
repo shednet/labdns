@@ -23,6 +23,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+const controllerLabel = "controller"
+
 // Metrics contains operational counters fed by controller watch events. Its
 // bookkeeping is never consulted when deciding DNS output.
 type Metrics struct {
@@ -42,10 +44,10 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 		endpoints: map[string]int{},
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "labdns_reconcile_duration_seconds", Help: "Duration of labdns reconciliations.",
-		}, []string{"controller"}),
+		}, []string{controllerLabel}),
 		errors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "labdns_reconcile_errors_total", Help: "Failed labdns reconciliations.",
-		}, []string{"controller"}),
+		}, []string{controllerLabel}),
 		source: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "labdns_managed_sources", Help: "Enabled sources managed by labdns.",
 		}, []string{"source_kind"}),

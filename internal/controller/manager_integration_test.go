@@ -20,6 +20,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -116,14 +117,10 @@ func (o *watchOutput) drain() {
 }
 
 func TestManagerWatchGraphAndDNSProviderAdmission(t *testing.T) { //nolint:gocyclo
-	moduleCache := os.Getenv("GOMODCACHE")
-	if moduleCache == "" {
-		t.Skip("GOMODCACHE is required for pinned Gateway API CRD fixtures")
-	}
 	environment := &envtest.Environment{CRDDirectoryPaths: []string{
 		filepath.Join("..", "..", "config", "crd", "bases"),
 		filepath.Join("..", "..", "test", "fixtures", "external-dns-v0.21.0"),
-		filepath.Join(moduleCache, "sigs.k8s.io", "gateway-api@v1.5.1", "config", "crd", "standard"),
+		gatewayAPICRDPath(t),
 	}, ErrorIfCRDPathMissing: true}
 	config, err := environment.Start()
 	if err != nil {
@@ -558,6 +555,19 @@ func TestManagerWatchGraphAndDNSProviderAdmission(t *testing.T) { //nolint:gocyc
 	case <-time.After(5 * time.Second):
 		t.Fatal("manager did not stop")
 	}
+}
+
+func gatewayAPICRDPath(t *testing.T) string {
+	t.Helper()
+	output, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "sigs.k8s.io/gateway-api").Output()
+	if err != nil {
+		t.Fatalf("locate Gateway API module: %v", err)
+	}
+	moduleDir := strings.TrimSpace(string(output))
+	if moduleDir == "" {
+		t.Fatal("Gateway API module has no local directory")
+	}
+	return filepath.Join(moduleDir, "config", "crd", "standard")
 }
 
 func validateExamplesThroughAPI(t *testing.T, ctx context.Context, kubeClient client.Client) {
