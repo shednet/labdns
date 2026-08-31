@@ -32,6 +32,8 @@ import (
 	labdnsv1alpha1 "github.com/shednet/labdns/api/v1alpha1"
 )
 
+const serviceKind = "Service"
+
 type Identity struct {
 	APIVersion string
 	Kind       string
@@ -181,7 +183,7 @@ func HTTPRouteProjection(ctx context.Context, reader client.Reader, route *gatew
 }
 
 func routeBackend(ctx context.Context, reader client.Reader, route *gatewayv1.HTTPRoute, ref gatewayv1.BackendObjectReference) (Backend, bool, error) {
-	if ref.Group != nil && string(*ref.Group) != "" || ref.Kind != nil && string(*ref.Kind) != "Service" {
+	if ref.Group != nil && string(*ref.Group) != "" || ref.Kind != nil && string(*ref.Kind) != serviceKind {
 		return Backend{}, false, nil
 	}
 	namespace := route.Namespace
@@ -209,7 +211,7 @@ func routeBackend(ctx context.Context, reader client.Reader, route *gatewayv1.HT
 			continue
 		}
 		for _, to := range grant.Spec.To {
-			if string(to.Group) == "" && string(to.Kind) == "Service" && (to.Name == nil || string(*to.Name) == backend.Name) {
+			if string(to.Group) == "" && string(to.Kind) == serviceKind && (to.Name == nil || string(*to.Name) == backend.Name) {
 				return backend, true, nil
 			}
 		}
