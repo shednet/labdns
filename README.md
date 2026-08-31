@@ -31,6 +31,20 @@ make verify-packaging
 Generated CRDs, RBAC, and `zz_generated.*` files must be updated through the
 generator targets and never edited by hand.
 
+Maintainer and release recipes use the pinned `bin/just` command:
+
+```sh
+make just
+bin/just --list
+bin/just check
+bin/just release patch
+```
+
+`release` accepts `patch`, `minor`, or `major`. It verifies synchronized clean
+`main`, runs the complete non-live-E2E gate, updates the chart version, creates
+the release commit and annotated tag, then prompts once before pushing them.
+The separately listed `test-e2e` recipe is live and is never part of `check`.
+
 ## License
 
 Apache License 2.0. Copyright 2026 Konstantinos Kalyvas.

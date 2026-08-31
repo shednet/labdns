@@ -353,6 +353,7 @@ GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 ACTIONLINT ?= $(LOCALBIN)/actionlint
 HELM ?= $(LOCALBIN)/helm
 KUBEBUILDER ?= $(LOCALBIN)/kubebuilder
+JUST ?= $(LOCALBIN)/just
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.7.1
@@ -369,6 +370,11 @@ GOLANGCI_LINT_VERSION ?= v2.7.2
 ACTIONLINT_VERSION ?= v1.7.7
 HELM_VERSION ?= v3.20.2
 KIND_VERSION ?= v0.30.0
+JUST_VERSION ?= 1.51.0
+
+.PHONY: verify-justfile
+verify-justfile: just ## Verify the justfile release workflow without modifying this repository.
+	@JUST="$(JUST)" hack/verify-justfile.sh
 
 .PHONY: kubebuilder
 kubebuilder: $(KUBEBUILDER) ## Download the pinned Kubebuilder CLI locally.
@@ -491,6 +497,33 @@ $(LOCALBIN)/kind-$(KIND_VERSION): | $(LOCALBIN)
 	[ "$${actual}" = "$${checksum}" ] || { echo "Kind checksum verification failed" >&2; exit 1; }; \
 	chmod 0755 "$${temporary}"; \
 	mv "$${temporary}" "$@"
+
+.PHONY: just
+just: $(JUST) ## Download the pinned just command runner locally.
+$(LOCALBIN)/just: $(LOCALBIN)/just-$(JUST_VERSION)
+	ln -sf "$$(realpath "$<")" "$@"
+$(LOCALBIN)/just-$(JUST_VERSION): | $(LOCALBIN)
+	@set -e; \
+	os="$$(go env GOOS)"; arch="$$(go env GOARCH)"; \
+	case "$${os}/$${arch}" in \
+		linux/amd64) target="x86_64-unknown-linux-musl"; checksum="c8f085ca3e885723c341d06243fc291b5abfdc8bbe3b2c076b117de490387b59" ;; \
+		linux/arm64) target="aarch64-unknown-linux-musl"; checksum="ed7ec466b77709198fd4afed253dba0270203ba5eb1c006bee2b0139090284f5" ;; \
+		darwin/amd64) target="x86_64-apple-darwin"; checksum="d583e45f1f9fcdd26069ad2fe3bb9dea414756d8d0752eb9093974cb5c0246f0" ;; \
+		darwin/arm64) target="aarch64-apple-darwin"; checksum="61e3f1b8a545ff064b091eab4b6e14f8cc743ff15549be293b1e92f5b1467002" ;; \
+		*) echo "No just $(JUST_VERSION) checksum is pinned for $${os}/$${arch}" >&2; exit 1 ;; \
+	esac; \
+	archive="$$(mktemp)"; extract="$$(mktemp -d)"; \
+	trap 'rm -f "$${archive}"; rm -rf "$${extract}"' EXIT; \
+	url="https://github.com/casey/just/releases/download/$(JUST_VERSION)/just-$(JUST_VERSION)-$${target}.tar.gz"; \
+	curl -fL "$${url}" -o "$${archive}"; \
+	if command -v sha256sum >/dev/null 2>&1; then \
+		actual="$$(sha256sum "$${archive}" | awk '{print $$1}')"; \
+	else \
+		actual="$$(shasum -a 256 "$${archive}" | awk '{print $$1}')"; \
+	fi; \
+	[ "$${actual}" = "$${checksum}" ] || { echo "just checksum verification failed" >&2; exit 1; }; \
+	tar -xzf "$${archive}" -C "$${extract}"; \
+	install -m 0755 "$${extract}/just" "$@"
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary
