@@ -1,3 +1,6 @@
-labdns requires the externaldns.k8s.io/v1alpha1 DNSEndpoint CRD and a
-separately managed ExternalDNS deployment. See the installation guide before
-creating DNSProvider resources.
+labdns requires the externaldns.k8s.io/v1alpha1 DNSEndpoint CRD. A separately
+managed ExternalDNS deployment is also required to publish generated objects
+to a DNS backend.
+Quick start: https://github.com/shednet/labdns/blob/main/docs/quick-start.md
+Production installation:
+https://github.com/shednet/labdns/blob/main/docs/installation.md
