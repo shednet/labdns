@@ -19,7 +19,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -37,7 +36,6 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -152,19 +150,7 @@ func main() {
 		setupLog.Error(err, "unable to add health check")
 		os.Exit(1)
 	}
-	readiness := &cacheReadiness{}
-	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		if !mgr.GetCache().WaitForCacheSync(ctx) {
-			return errors.New("manager cache synchronization failed")
-		}
-		readiness.markSynced()
-		<-ctx.Done()
-		return nil
-	})); err != nil {
-		setupLog.Error(err, "unable to add cache synchronization readiness tracker")
-		os.Exit(1)
-	}
-	if err := mgr.AddReadyzCheck("readyz", readiness.check); err != nil {
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to add readiness check")
 		os.Exit(1)
 	}

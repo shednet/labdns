@@ -231,7 +231,7 @@ build-local:
     #!/usr/bin/env bash
     set -euo pipefail
     version=$("{{ just }}" version)
-    make docker-build IMG="{{ image_repository }}:v$version"
+    docker build --tag "{{ image_repository }}:v$version" .
 
 # Build and load into an explicitly named, invocation-owned isolated Kind cluster.
 build-kind cluster:
@@ -245,7 +245,7 @@ build-kind cluster:
     kind get clusters | grep -Fxq "$cluster" || { echo "Kind cluster $cluster does not exist." >&2; exit 1; }
     version=$("{{ just }}" version)
     image="{{ image_repository }}:v$version"
-    make docker-build IMG="$image"
+    docker build --tag "$image" .
     kind load docker-image "$image" --name "$cluster"
 
 # Run the live E2E suite in its isolated Kind environment.

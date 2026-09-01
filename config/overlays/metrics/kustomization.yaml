@@ -14,9 +14,9 @@ patches:
       path: /spec/template/spec/containers/0/args/-
       value: --metrics-secure=false
     - op: add
-      path: /spec/template/spec/containers/0/ports/-
+      path: /spec/template/spec/containers/0/ports
       value:
-        name: metrics
+      - name: metrics
         containerPort: 8080
         protocol: TCP
 - target:
