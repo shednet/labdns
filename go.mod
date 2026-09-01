@@ -7,9 +7,9 @@ require (
 	github.com/onsi/ginkgo/v2 v2.28.0
 	github.com/onsi/gomega v1.39.1
 	github.com/prometheus/client_golang v1.23.2
-	k8s.io/api v0.35.3
+	k8s.io/api v0.35.8
 	k8s.io/apimachinery v0.37.0
-	k8s.io/client-go v0.35.3
+	k8s.io/client-go v0.35.8
 	k8s.io/utils v0.0.0-20260626114624-be93311217bd
 	sigs.k8s.io/controller-runtime v0.23.3
 	sigs.k8s.io/external-dns v0.21.0
