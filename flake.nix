@@ -24,7 +24,7 @@
           packages = with pkgs; [
             go_1_26
             kind
-            helm
+            kubernetes-helm
           ];
 
           shellHook = ''
