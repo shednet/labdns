@@ -28,8 +28,6 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -71,7 +69,6 @@ var (
 	nodes       []corev1.Node
 	wwwDNS      *dnsForward
 	vpnDNS      *dnsForward
-	repoRoot    string
 	kubeconfig  string
 	kubeContext string
 )
@@ -87,7 +84,6 @@ var (
 )
 
 var _ = BeforeSuite(func(ctx SpecContext) {
-	repoRoot = repositoryRoot()
 	cluster := requiredEnvironment("KIND_CLUSTER")
 	invocation := requiredEnvironment("E2E_INVOCATION_ID")
 	kubeconfig = requiredEnvironment("KUBECONFIG")
@@ -95,29 +91,6 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 	Expect(kubeconfig).To(Equal("/tmp/labdns-kind-kubeconfig-" + invocation))
 	Expect(cluster).To(MatchRegexp(`^labdns-e2e-[a-z0-9]([-a-z0-9]{0,50}[a-z0-9])?$`), "the suite only accepts a safe invocation-unique labdns Kind cluster")
 	Expect(invocation).To(MatchRegexp(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`))
-	Expect(run(ctx, filepath.Join(repoRoot, "bin", "kind"), "get", "clusters")).To(ContainElement(cluster))
-	Expect(strings.TrimSpace(kubectlOutput(ctx, "config", "current-context"))).To(Equal(kubeContext))
-
-	imageTag := "run-" + regexp.MustCompile(`[^a-zA-Z0-9_.-]`).ReplaceAllString(invocation, "-")
-	image := "labdns-controller:" + imageTag
-	runIn(ctx, repoRoot, "docker", "build", "--tag", image, ".")
-	run(ctx, filepath.Join(repoRoot, "bin", "kind"), "load", "docker-image", "--name", cluster, image)
-	kubectlRun(ctx, "apply", "-f", filepath.Join(repoRoot, "test/fixtures/external-dns-v0.21.0/dnsendpoints.externaldns.k8s.io.yaml"))
-	kubectlRun(ctx, "apply", "-f", filepath.Join(repoRoot, "config/crd/bases/labdns.shednet.dev_dnsproviders.yaml"))
-	kubectlRun(ctx, "apply", "-f", filepath.Join(repoRoot, "test/e2e/stack.yaml"))
-	run(ctx, filepath.Join(repoRoot, "bin", "helm"), "--kubeconfig", kubeconfig, "--kube-context", kubeContext, "upgrade", "--install", "labdns", filepath.Join(repoRoot, "charts/labdns"),
-		"--namespace", systemNamespace,
-		"--set", "fullnameOverride=labdns",
-		"--set", "image.repository=labdns-controller",
-		"--set", "image.tag="+imageTag,
-		"--set", "image.pullPolicy=Never",
-		"--set", "leaderElection=false",
-		"--wait", "--timeout=3m")
-
-	for _, deployment := range []string{"etcd-www", "etcd-vpn", "coredns-www", "coredns-vpn", "external-dns-www", "external-dns-vpn"} {
-		kubectlRun(ctx, "rollout", "status", "--namespace", systemNamespace, "deployment/"+deployment, "--timeout=3m")
-	}
-
 	scheme := k8sruntime.NewScheme()
 	Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
 	Expect(labdnsv1alpha1.AddToScheme(scheme)).To(Succeed())
@@ -262,42 +235,8 @@ func requiredEnvironment(name string) string {
 	return value
 }
 
-func repositoryRoot() string {
-	directory, err := os.Getwd()
-	Expect(err).NotTo(HaveOccurred())
-	for {
-		if _, statErr := os.Stat(filepath.Join(directory, "go.mod")); statErr == nil {
-			return directory
-		}
-		parent := filepath.Dir(directory)
-		Expect(parent).NotTo(Equal(directory), "could not locate repository root from %s", directory)
-		directory = parent
-	}
-}
-
-func run(ctx context.Context, name string, args ...string) []string {
-	output := runOutput(ctx, name, args...)
-	if strings.TrimSpace(output) == "" {
-		return nil
-	}
-	return strings.Split(strings.TrimSpace(output), "\n")
-}
-
 func runOutput(ctx context.Context, name string, args ...string) string {
-	return runOutputIn(ctx, "", name, args...)
-}
-
-func runIn(ctx context.Context, directory, name string, args ...string) []string {
-	output := runOutputIn(ctx, directory, name, args...)
-	if strings.TrimSpace(output) == "" {
-		return nil
-	}
-	return strings.Split(strings.TrimSpace(output), "\n")
-}
-
-func runOutputIn(ctx context.Context, directory, name string, args ...string) string {
 	command := exec.CommandContext(ctx, name, args...)
-	command.Dir = directory
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -306,8 +245,8 @@ func runOutputIn(ctx context.Context, directory, name string, args ...string) st
 	return stdout.String()
 }
 
-func kubectlRun(ctx context.Context, args ...string) []string {
-	return run(ctx, "kubectl", kubectlArgs(args...)...)
+func kubectlRun(ctx context.Context, args ...string) {
+	runOutput(ctx, "kubectl", kubectlArgs(args...)...)
 }
 
 func kubectlOutput(ctx context.Context, args ...string) string {
@@ -448,7 +387,18 @@ func restartDeployment(ctx context.Context, name string) {
 	}
 	deployment.Spec.Template.Annotations["labdns.shednet.dev/e2e-restarted-at"] = time.Now().UTC().Format(time.RFC3339Nano)
 	Expect(kubeClient.Update(ctx, &deployment)).To(Succeed())
-	kubectlRun(ctx, "rollout", "status", "--namespace", systemNamespace, "deployment/"+name, "--timeout=2m")
+	Eventually(func(g Gomega) {
+		var current appsv1.Deployment
+		g.Expect(kubeClient.Get(ctx, types.NamespacedName{Namespace: systemNamespace, Name: name}, &current)).To(Succeed())
+		desired := int32(1)
+		if current.Spec.Replicas != nil {
+			desired = *current.Spec.Replicas
+		}
+		g.Expect(current.Status.ObservedGeneration).To(BeNumerically(">=", current.Generation))
+		g.Expect(current.Status.UpdatedReplicas).To(Equal(desired))
+		g.Expect(current.Status.AvailableReplicas).To(Equal(desired))
+		g.Expect(current.Status.Replicas).To(Equal(desired))
+	}, 2*time.Minute, 250*time.Millisecond).Should(Succeed())
 }
 
 func expectedByType(pairs []addressPair) (map[uint16][]string, map[string]struct{}) {
@@ -602,7 +552,7 @@ type etcdService struct {
 }
 
 func etcdServices(ctx context.Context, provider string) []etcdService {
-	pod := strings.TrimSpace(kubectlOutput(ctx, "get", "pods", "--namespace", systemNamespace, "-l", "app=etcd-"+provider, "-o", "jsonpath={.items[0].metadata.name}"))
+	pod := etcdPodName(ctx, provider)
 	output := kubectlOutput(ctx, "exec", "--namespace", systemNamespace, pod, "--", "etcdctl", "--endpoints=http://127.0.0.1:2379", "get", "/skydns/", "--prefix", "--write-out=json")
 	var response struct {
 		KVs []struct {
@@ -683,8 +633,15 @@ func etcdHostnamePrefix(name string) string {
 }
 
 func putForeignRecord(ctx context.Context, provider string) {
-	pod := strings.TrimSpace(kubectlOutput(ctx, "get", "pods", "--namespace", systemNamespace, "-l", "app=etcd-"+provider, "-o", "jsonpath={.items[0].metadata.name}"))
+	pod := etcdPodName(ctx, provider)
 	kubectlRun(ctx, "exec", "--namespace", systemNamespace, pod, "--", "etcdctl", "--endpoints=http://127.0.0.1:2379", "put", "/skydns/test/example/e2e/foreign/static", foreignRaw)
+}
+
+func etcdPodName(ctx context.Context, provider string) string {
+	var pods corev1.PodList
+	Expect(kubeClient.List(ctx, &pods, client.InNamespace(systemNamespace), client.MatchingLabels{"app": "etcd-" + provider})).To(Succeed())
+	Expect(pods.Items).To(HaveLen(1))
+	return pods.Items[0].Name
 }
 
 func assertForeignRecord(ctx context.Context, provider string) {

@@ -171,6 +171,35 @@ setup-test-e2e: ## Create a fresh isolated dual-stack Kind cluster for E2E tests
 		exit $$create_status; \
 	fi
 
+.PHONY: setup-test-e2e-stack
+setup-test-e2e-stack: ## Build and install the E2E stack in the isolated cluster.
+	@test -n "$${KIND_CLUSTER}" && test -n "$${E2E_INVOCATION_ID}" || { \
+		echo "KIND_CLUSTER and E2E_INVOCATION_ID must identify this isolated invocation." >&2; \
+		exit 1; \
+	}
+	@kubeconfig="/tmp/labdns-kind-kubeconfig-$${E2E_INVOCATION_ID}"; \
+	context="kind-$${KIND_CLUSTER}"; \
+	image_repository="labdns-controller"; \
+	image_tag="run-$${KIND_CLUSTER}"; \
+	image="$${image_repository}:$${image_tag}"; \
+	$(CONTAINER_TOOL) build --tag "$${image}" .; \
+	$(KIND) load docker-image --name "$${KIND_CLUSTER}" "$${image}"; \
+	$(KUBECTL) --kubeconfig "$${kubeconfig}" --context "$${context}" apply -f test/fixtures/external-dns-v0.21.0/dnsendpoints.externaldns.k8s.io.yaml; \
+	$(KUBECTL) --kubeconfig "$${kubeconfig}" --context "$${context}" apply -f config/crd/bases/labdns.shednet.dev_dnsproviders.yaml; \
+	$(KUBECTL) --kubeconfig "$${kubeconfig}" --context "$${context}" apply -f test/e2e/stack.yaml; \
+	$(HELM) --kubeconfig "$${kubeconfig}" --kube-context "$${context}" upgrade --install labdns charts/labdns \
+		--namespace labdns-e2e-system \
+		--set fullnameOverride=labdns \
+		--set image.repository="$${image_repository}" \
+		--set image.tag="$${image_tag}" \
+		--set image.pullPolicy=Never \
+		--set leaderElection=false \
+		--wait --timeout=3m; \
+	for deployment in etcd-www etcd-vpn coredns-www coredns-vpn external-dns-www external-dns-vpn; do \
+		$(KUBECTL) --kubeconfig "$${kubeconfig}" --context "$${context}" rollout status \
+			--namespace labdns-e2e-system "deployment/$${deployment}" --timeout=3m; \
+	done
+
 .PHONY: test-e2e
 test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
 	@invocation_id="$${E2E_INVOCATION_ID}"; \
@@ -182,7 +211,10 @@ test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated 
 	kubeconfig="/tmp/labdns-kind-kubeconfig-$$invocation_id"; \
 	$(MAKE) setup-test-e2e KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id"; \
 	status=0; \
-	KUBECONFIG="$$kubeconfig" KIND=$(KIND) KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id" go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout=8m || status=$$?; \
+	$(MAKE) setup-test-e2e-stack KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id" || status=$$?; \
+	if [ $$status -eq 0 ]; then \
+		KUBECONFIG="$$kubeconfig" KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id" go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout=8m || status=$$?; \
+	fi; \
 	if [ $$status -ne 0 ]; then \
 		echo "E2E failed; exporting diagnostics to $$diagnostics_dir" >&2; \
 		KIND="$(KIND)" KIND_CLUSTER="$$cluster_name" E2E_INVOCATION_ID="$$invocation_id" E2E_DIAGNOSTICS_DIR="$$diagnostics_dir" hack/collect-e2e-diagnostics.sh || true; \
