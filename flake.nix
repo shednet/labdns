@@ -27,6 +27,13 @@
           subPackages = [ "cmd/labdns" ];
           vendorHash = "sha256-lSbx0KGS+fjgA7zBx+hcdKoGllYS99Fr+Dkh1J/StZ4=";
           ldflags = [ "-s" "-w" "-X main.version=${cliVersion}" ];
+          nativeBuildInputs = [ pkgs.installShellFiles ];
+          postInstall = ''
+            installShellCompletion --cmd labdns \
+              --bash <($out/bin/labdns completion bash) \
+              --fish <($out/bin/labdns completion fish) \
+              --zsh <($out/bin/labdns completion zsh)
+          '';
         };
       in
       {
