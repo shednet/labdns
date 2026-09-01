@@ -23,6 +23,9 @@ rules:
 - apiGroups: [""]
   resources: [events]
   verbs: [create, patch]
+- apiGroups: [events.k8s.io]
+  resources: [events]
+  verbs: [create, patch]
 {{- if .Values.gatewayAPI.enabled }}
 - apiGroups: [gateway.networking.k8s.io]
   resources: [httproutes, gateways, gatewayclasses, referencegrants]
