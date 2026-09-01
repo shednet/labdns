@@ -45,7 +45,7 @@ jobs:
               return;
             }
 
-            if (pull.base.ref !== context.payload.workflow_run.repository.default_branch) {
+            if (pull.base.ref !== pull.base.repo.default_branch) {
               core.info(`PR #${pull.number} does not target the default branch`);
               return;
             }
