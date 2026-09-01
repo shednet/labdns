@@ -62,6 +62,7 @@ const (
 // Gateway API overlay and Helm value grant the same permissions conditionally.
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes;gateways;gatewayclasses;referencegrants,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 func Setup(ctx context.Context, mgr manager.Manager, output source.Output, gatewayEnabled bool, observed ...*Metrics) error {
 	var metrics *Metrics
