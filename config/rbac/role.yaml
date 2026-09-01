@@ -7,6 +7,13 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
   - nodes
   - services
   verbs:
@@ -21,13 +28,6 @@ rules:
   - get
   - list
   - watch
-- apiGroups:
-  - events.k8s.io
-  resources:
-  - events
-  verbs:
-  - create
-  - patch
 - apiGroups:
   - externaldns.k8s.io
   resources:
