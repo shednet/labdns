@@ -51,17 +51,3 @@ func TestParseLogLevelRejectsUnknownValue(t *testing.T) {
 		t.Fatal("parseLogLevel(trace) unexpectedly succeeded")
 	}
 }
-
-func TestCacheReadinessRequiresSynchronization(t *testing.T) {
-	t.Parallel()
-
-	readiness := &cacheReadiness{}
-	if err := readiness.check(nil); err == nil {
-		t.Fatal("readiness unexpectedly passed before cache synchronization")
-	}
-
-	readiness.markSynced()
-	if err := readiness.check(nil); err != nil {
-		t.Fatalf("readiness failed after cache synchronization: %v", err)
-	}
-}

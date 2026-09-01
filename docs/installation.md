@@ -56,9 +56,8 @@ Install a fresh environment in this order:
 At startup labdns discovers the namespaced
 `externaldns.k8s.io/v1alpha1/dnsendpoints` resource before installing any
 controller. Missing or incompatible prerequisite APIs cause a clear startup
-failure. Readiness becomes successful only after prerequisite discovery and
-manager cache synchronization; it does not report ExternalDNS or backend DNS
-health.
+failure. Readiness reports manager process health; it does not report leadership,
+cache synchronization, ExternalDNS, or backend DNS health.
 
 Uninstalling labdns removes neither ExternalDNS nor the official DNSEndpoint
 CRD. Remove those independent prerequisites only after their records and
