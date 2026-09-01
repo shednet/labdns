@@ -3,10 +3,10 @@ module github.com/shednet/labdns
 go 1.26.1
 
 require (
-	github.com/go-logr/logr v1.4.3
-	github.com/onsi/ginkgo/v2 v2.28.0
-	github.com/onsi/gomega v1.39.1
-	github.com/prometheus/client_golang v1.23.2
+	github.com/go-logr/logr v1.4.4
+	github.com/onsi/ginkgo/v2 v2.32.1
+	github.com/onsi/gomega v1.40.0
+	github.com/prometheus/client_golang v1.24.1
 	k8s.io/api v0.35.8
 	k8s.io/apimachinery v0.37.0
 	k8s.io/client-go v0.35.8
@@ -27,11 +27,11 @@ require (
 	github.com/go-openapi/swag/stringutils v0.27.1 // indirect
 	github.com/go-openapi/swag/typeutils v0.27.1 // indirect
 	github.com/go-openapi/swag/yamlutils v0.27.1 // indirect
-	github.com/google/pprof v0.0.0-20260115054156-294ebfa9ad83 // indirect
-	github.com/miekg/dns v1.1.72
+	github.com/google/pprof v0.0.0-20260402051712-545e8a4df936 // indirect
+	github.com/miekg/dns v1.1.73
 	github.com/sirupsen/logrus v1.9.4 // indirect
-	golang.org/x/mod v0.37.0 // indirect
-	golang.org/x/tools v0.47.0 // indirect
+	golang.org/x/mod v0.38.0 // indirect
+	golang.org/x/tools v0.48.0 // indirect
 )
 
 require (
@@ -68,8 +68,8 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
-	github.com/prometheus/common v0.67.5 // indirect
-	github.com/prometheus/procfs v0.17.0 // indirect
+	github.com/prometheus/common v0.70.1 // indirect
+	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/spf13/cobra v1.10.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/stoewer/go-strcase v1.3.0 // indirect
