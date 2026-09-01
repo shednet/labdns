@@ -40,6 +40,9 @@ must not be included in production manifests.
 - When a ready, non-draft maintainer pull request targets `main`, successful CI
   for its current head enables GitHub squash auto-merge. A newer head must pass
   CI again before it is eligible.
+- After the pull request is auto-merged, switch to `main`, update it with
+  `git pull --ff-only`, and delete the local feature branch with
+  `git branch -D <feature-branch>`; squash merges are not ancestors of `main`.
 - Releases are separate from the pull-request workflow. Run `just release`
   from `main` and follow its review and push prompt; do not use the release
   procedure as a shortcut for ordinary changes.
