@@ -105,7 +105,8 @@ KIND_NODE_IMAGE ?= kindest/node:v1.35.0
 KIND_CONFIG ?= test/e2e/kind.yaml
 E2E_KEEP_CLUSTER_ON_FAILURE ?= false
 E2E_DIAGNOSTICS_DIR ?=
-export KIND_CLUSTER E2E_INVOCATION_ID KIND_EXPERIMENTAL_PROVIDER KIND_NODE_IMAGE KIND_CONFIG E2E_DIAGNOSTICS_DIR
+E2E_IMAGE_PREBUILT ?= false
+export KIND_CLUSTER E2E_INVOCATION_ID KIND_EXPERIMENTAL_PROVIDER KIND_NODE_IMAGE KIND_CONFIG E2E_DIAGNOSTICS_DIR E2E_IMAGE_PREBUILT
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Create a fresh isolated dual-stack Kind cluster for E2E tests.
@@ -175,7 +176,14 @@ setup-test-e2e-stack: ## Build and install the E2E stack in the isolated cluster
 	image_repository="labdns-controller"; \
 	image_tag="run-$${KIND_CLUSTER}"; \
 	image="$${image_repository}:$${image_tag}"; \
-	$(CONTAINER_TOOL) build --tag "$${image}" .; \
+	case "$(E2E_IMAGE_PREBUILT)" in \
+		false) $(CONTAINER_TOOL) build --tag "$${image}" . ;; \
+		true) $(CONTAINER_TOOL) image inspect "$${image}" >/dev/null || { \
+			echo "Prebuilt E2E image '$${image}' is not available in Docker." >&2; \
+			exit 1; \
+		} ;; \
+		*) echo "E2E_IMAGE_PREBUILT must be true or false." >&2; exit 1 ;; \
+	esac; \
 	$(KIND) load docker-image --name "$${KIND_CLUSTER}" "$${image}"; \
 	$(KUBECTL) --kubeconfig "$${kubeconfig}" --context "$${context}" apply -f test/fixtures/external-dns-v0.21.0/dnsendpoints.externaldns.k8s.io.yaml; \
 	$(KUBECTL) --kubeconfig "$${kubeconfig}" --context "$${context}" apply -f config/crd/bases/labdns.shednet.dev_dnsproviders.yaml; \
@@ -193,8 +201,14 @@ setup-test-e2e-stack: ## Build and install the E2E stack in the isolated cluster
 			--namespace labdns-e2e-system "deployment/$${deployment}" --timeout=3m; \
 	done
 
-.PHONY: test-e2e
+.PHONY: test-e2e test-e2e-ci run-test-e2e
 test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
+	@$(MAKE) run-test-e2e
+
+test-e2e-ci: ## Run E2E in CI after separate validation and image build.
+	@$(MAKE) run-test-e2e
+
+run-test-e2e:
 	@invocation_id="$${E2E_INVOCATION_ID}"; \
 	if [ -z "$$invocation_id" ]; then invocation_id="$$(date -u +%Y%m%d%H%M%S)-$$$$-$${RANDOM}"; fi; \
 	cluster_name="$${KIND_CLUSTER}"; \

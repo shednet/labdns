@@ -14,8 +14,114 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      validate: ${{ steps.filter.outputs.validate }}
+      lint: ${{ steps.filter.outputs.lint }}
+      test: ${{ steps.filter.outputs.test }}
+      e2e: ${{ steps.filter.outputs.e2e }}
+      unknown: ${{ steps.filter.outputs.unknown }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          predicate-quantifier: some-with-excludes
+          filters: |
+            validate:
+              - '**'
+              - '!**/*.md'
+              - '!LICENSE'
+            lint:
+              - '.golangci.yml'
+              - 'api/**/*.go'
+              - 'cmd/**/*.go'
+              - 'internal/**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+              - 'hack/boilerplate.go.txt'
+              - 'Makefile'
+              - 'PROJECT'
+            test:
+              - 'api/**/*.go'
+              - 'cmd/**/*.go'
+              - 'internal/**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+              - 'hack/boilerplate.go.txt'
+              - 'Makefile'
+              - 'PROJECT'
+            e2e:
+              - '.dockerignore'
+              - '.github/workflows/ci.yml'
+              - 'Dockerfile'
+              - 'Makefile'
+              - 'PROJECT'
+              - 'api/**/*.go'
+              - '!api/**/*_test.go'
+              - 'charts/labdns/Chart.yaml'
+              - 'charts/labdns/crds/**'
+              - 'charts/labdns/templates/**'
+              - 'charts/labdns/values.yaml'
+              - 'cmd/**/*.go'
+              - '!cmd/**/*_test.go'
+              - 'config/**'
+              - 'examples/**'
+              - 'go.mod'
+              - 'go.sum'
+              - 'hack/**'
+              - 'internal/**/*.go'
+              - '!internal/**/*_test.go'
+              - 'test/e2e/*.go'
+              - 'test/e2e/*.yaml'
+              - 'test/fixtures/**/*.yaml'
+            unknown:
+              - '**'
+              - '!.dockerignore'
+              - '!.envrc'
+              - '!.github/dependabot.yml'
+              - '!.github/workflows/automerge.yml'
+              - '!.github/workflows/ci.yml'
+              - '!.github/workflows/release.yml'
+              - '!.gitignore'
+              - '!.golangci.yml'
+              - '!AGENTS.md'
+              - '!Dockerfile'
+              - '!LICENSE'
+              - '!Makefile'
+              - '!PROJECT'
+              - '!README.md'
+              - '!api/**'
+              - '!charts/**'
+              - '!cmd/**'
+              - '!config/**'
+              - '!docs/**'
+              - '!examples/**'
+              - '!flake.lock'
+              - '!flake.nix'
+              - '!go.mod'
+              - '!go.sum'
+              - '!hack/**'
+              - '!internal/**'
+              - '!justfile'
+              - '!test/e2e/**'
+              - '!test/fixtures/**'
+
   validate:
     name: validate
+    needs: changes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      needs.changes.outputs.validate == 'true' ||
+      needs.changes.outputs.unknown == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -24,6 +130,14 @@ jobs:
         with:
           go-version: 1.26.1
           cache: true
+      - name: Restore validation tools
+        uses: actions/cache@v5
+        with:
+          path: |
+            bin/actionlint*
+            bin/controller-gen*
+            bin/kustomize*
+          key: validate-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Makefile', 'go.mod', 'go.sum') }}
       - name: Check module graph
         run: |
           go mod tidy
@@ -39,6 +153,11 @@ jobs:
 
   lint:
     name: lint
+    needs: changes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      needs.changes.outputs.lint == 'true' ||
+      needs.changes.outputs.unknown == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -54,6 +173,11 @@ jobs:
 
   test:
     name: test
+    needs: changes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      needs.changes.outputs.test == 'true' ||
+      needs.changes.outputs.unknown == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -62,17 +186,31 @@ jobs:
         with:
           go-version: 1.26.1
           cache: true
+      - name: Restore test tools and envtest assets
+        uses: actions/cache@v5
+        with:
+          path: |
+            bin/controller-gen*
+            bin/k8s/**
+            bin/setup-envtest*
+          key: test-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Makefile', 'go.mod', 'go.sum') }}
       - name: Test
         run: make test
 
   e2e:
     name: e2e
+    needs: changes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      needs.changes.outputs.e2e == 'true' ||
+      needs.changes.outputs.unknown == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       KIND_CLUSTER: labdns-e2e-${{ github.run_id }}-${{ github.run_attempt }}
       E2E_INVOCATION_ID: github-${{ github.run_id }}-${{ github.run_attempt }}-e2e
       E2E_DIAGNOSTICS_DIR: /tmp/kind-logs-${{ github.run_id }}-${{ github.run_attempt }}
+      E2E_IMAGE_PREBUILT: "true"
       KUBECONFIG: /tmp/labdns-kind-kubeconfig-github-${{ github.run_id }}-${{ github.run_attempt }}-e2e
       KIND_EXPERIMENTAL_PROVIDER: docker
     steps:
@@ -81,11 +219,21 @@ jobs:
         with:
           go-version: 1.26.1
           cache: true
+      - uses: docker/setup-buildx-action@v4
+      - name: Build controller image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: labdns-controller:run-${{ env.KIND_CLUSTER }}
+          cache-from: type=gha,scope=controller-image-amd64
+          cache-to: type=gha,mode=max,scope=controller-image-amd64
       - name: Run isolated dual-stack publication path
         env:
           KIND_NODE_IMAGE: kindest/node:v1.35.0
           E2E_KEEP_CLUSTER_ON_FAILURE: "true"
-        run: make test-e2e
+        run: make test-e2e-ci
       - name: Collect diagnostics
         if: failure()
         run: hack/collect-e2e-diagnostics.sh || true
@@ -102,13 +250,20 @@ jobs:
   checks:
     name: checks
     if: always()
-    needs: [validate, lint, test, e2e]
+    needs: [changes, validate, lint, test, e2e]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: Confirm all CI jobs passed
         run: |
-          test '${{ needs.validate.result }}' = success
-          test '${{ needs.lint.result }}' = success
-          test '${{ needs.test.result }}' = success
-          test '${{ needs.e2e.result }}' = success
+          test '${{ needs.changes.result }}' = success
+          for result in \
+            '${{ needs.validate.result }}' \
+            '${{ needs.lint.result }}' \
+            '${{ needs.test.result }}' \
+            '${{ needs.e2e.result }}'; do
+            case "$result" in
+              success|skipped) ;;
+              *) exit 1 ;;
+            esac
+          done
