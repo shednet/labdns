@@ -27,5 +27,5 @@ import (
 
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "labdns publication contract")
+	RunSpecs(t, "labdns end-to-end publication")
 }
