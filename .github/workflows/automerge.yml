@@ -1,0 +1,81 @@
+name: Auto-merge maintainer PRs
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: automerge-${{ github.event.workflow_run.pull_requests[0].number }}
+  cancel-in-progress: false
+
+jobs:
+  enable:
+    name: enable auto-merge
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Check maintainer permission and current head
+        id: eligibility
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const candidates = context.payload.workflow_run.pull_requests;
+            if (candidates.length !== 1) {
+              core.info(`Expected one pull request, found ${candidates.length}`);
+              return;
+            }
+
+            const {owner, repo} = context.repo;
+            const {data: pull} = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: candidates[0].number,
+            });
+
+            if (pull.state !== 'open' || pull.draft) {
+              core.info(`PR #${pull.number} is not an open, ready PR`);
+              return;
+            }
+
+            if (pull.base.ref !== context.payload.workflow_run.repository.default_branch) {
+              core.info(`PR #${pull.number} does not target the default branch`);
+              return;
+            }
+
+            if (pull.auto_merge !== null) {
+              core.info(`Auto-merge is already enabled for PR #${pull.number}`);
+              return;
+            }
+
+            if (pull.head.sha !== context.payload.workflow_run.head_sha) {
+              core.info(`PR #${pull.number} changed after this CI run started`);
+              return;
+            }
+
+            const {data: access} = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner,
+              repo,
+              username: pull.user.login,
+            });
+            const role = access.role_name ?? access.permission;
+            if (!['admin', 'maintain'].includes(role)) {
+              core.info(`${pull.user.login} does not have maintainer permission`);
+              return;
+            }
+
+            core.setOutput('pull-request', pull.number);
+
+      - name: Enable GitHub auto-merge
+        if: steps.eligibility.outputs.pull-request != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.eligibility.outputs.pull-request }}
+        run: gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --squash --auto
