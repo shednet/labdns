@@ -1,5 +1,6 @@
 # Controller image used by rendered and deployed manifests.
 IMG ?= controller:dev
+CLI_VERSION ?= dev
 
 # Location to install Go-based build dependencies and envtest assets.
 LOCALBIN ?= $(shell pwd)/bin
@@ -292,8 +293,12 @@ lint-config: golangci-lint ## Check golangci-lint configuration
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet ## Build manager binary.
+build: manifests generate fmt vet build-cli | $(LOCALBIN) ## Build manager and CLI binaries.
 	go build -o bin/manager ./cmd
+
+.PHONY: build-cli
+build-cli: | $(LOCALBIN) ## Build the labdns inspection CLI.
+	go build -trimpath -ldflags "-X main.version=$(CLI_VERSION)" -o bin/labdns ./cmd/labdns
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.

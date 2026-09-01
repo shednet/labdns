@@ -128,3 +128,27 @@ func PendingTargetCount(value string) (int, error) {
 	}
 	return len(state.Pending), nil
 }
+
+// PendingTarget describes one target retained until its deletion deadline.
+// It is exposed for read-only inspection of labdns-managed DNSEndpoints.
+type PendingTarget struct {
+	DNSName    string    `json:"dnsName"`
+	RecordType string    `json:"recordType"`
+	Target     string    `json:"target"`
+	Deadline   time.Time `json:"deadline"`
+}
+
+// InspectLifecycle validates persisted lifecycle state and returns its pending targets.
+func InspectLifecycle(value string) ([]PendingTarget, error) {
+	state, err := parseLifecycle(value)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]PendingTarget, 0, len(state.Pending))
+	for _, item := range state.Pending {
+		result = append(result, PendingTarget{
+			DNSName: item.DNSName, RecordType: item.RecordType, Target: item.Target, Deadline: deadline(item),
+		})
+	}
+	return result, nil
+}

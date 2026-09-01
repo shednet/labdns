@@ -15,6 +15,10 @@ topology, follow the ordered [installation guide](docs/installation.md). See
 [configuration](docs/configuration.md) for supported sources, annotations,
 provider profiles, target resolution, metrics, and publication isolation.
 
+Use the [`labdns` CLI](docs/cli.md) to inspect controller health, list generated
+records, correlate a record with its source and logical provider, and optionally
+compare it with a specific DNS resolver.
+
 ## Development
 
 The project requires Go 1.26.1 and Helm. Go-based build and test tools are

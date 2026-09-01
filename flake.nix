@@ -18,8 +18,23 @@
         pkgs = import nixpkgs {
           inherit system;
         };
+        buildGo126Module = pkgs.buildGoModule.override { go = pkgs.go_1_26; };
+        cliVersion = self.shortRev or "dev";
+        labdns = buildGo126Module {
+          pname = "labdns";
+          version = cliVersion;
+          src = self;
+          subPackages = [ "cmd/labdns" ];
+          vendorHash = "sha256-lSbx0KGS+fjgA7zBx+hcdKoGllYS99Fr+Dkh1J/StZ4=";
+          ldflags = [ "-s" "-w" "-X main.version=${cliVersion}" ];
+        };
       in
       {
+        packages.labdns = labdns;
+        packages.default = labdns;
+        apps.labdns = flake-utils.lib.mkApp { drv = labdns; };
+        apps.default = flake-utils.lib.mkApp { drv = labdns; };
+
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             go_1_26
