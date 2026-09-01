@@ -16,7 +16,7 @@ isolation, and examples. Existing installations must follow the explicit
 
 ## Development
 
-The project requires Go 1.26.1 and Helm. Go-based build and test tools are
+The project requires Go 1.26.6 and Helm. Go-based build and test tools are
 installed under `bin/` by the Makefile; Helm must be available on `PATH`.
 
 ```sh
