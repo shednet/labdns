@@ -58,7 +58,8 @@ const (
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses;ingressclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services;nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
-// TODO(stage4): render the following Gateway API permissions only when Gateway support is enabled.
+// The default Kustomize deployment removes this generated rule; the opt-in
+// Gateway API overlay and Helm value grant the same permissions conditionally.
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes;gateways;gatewayclasses;referencegrants,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 

@@ -1,5 +1,5 @@
 {
-  description = "Certus development shell";
+  description = "labdns development shell";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";

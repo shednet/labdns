@@ -9,10 +9,11 @@ It resolves source backends through EndpointSlices and Node labels, then emits
 one durable DNSEndpoint per source and logical DNSProvider. Provider-label
 filters keep independently managed ExternalDNS deployments isolated.
 
-Start with the ordered [installation guide](docs/installation.md). See
-[configuration](docs/configuration.md) for flags, metrics, split-horizon
-isolation, and examples. Existing installations must follow the explicit
-[breaking upgrade procedure](docs/upgrade.md).
+Use the [quick start](docs/quick-start.md) to connect an existing ExternalDNS
+deployment and publish an Ingress through labdns. For a complete production
+topology, follow the ordered [installation guide](docs/installation.md). See
+[configuration](docs/configuration.md) for supported sources, annotations,
+provider profiles, target resolution, metrics, and publication isolation.
 
 ## Development
 
