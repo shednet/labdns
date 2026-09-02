@@ -38,7 +38,7 @@ func LookupDNS(ctx context.Context, server, name, recordType string, expected []
 	}
 	queryType, found := map[string]uint16{"A": dns.TypeA, "AAAA": dns.TypeAAAA}[strings.ToUpper(recordType)]
 	if !found {
-		result.State, result.Error = "unsupported", fmt.Sprintf("live lookup does not support record type %s", recordType)
+		result.State, result.Error = stateUnsupported, fmt.Sprintf("live lookup does not support record type %s", recordType)
 		return result
 	}
 	message := new(dns.Msg)
@@ -56,7 +56,7 @@ func LookupDNS(ctx context.Context, server, name, recordType string, expected []
 		}
 	}
 	if response.Rcode == dns.RcodeNameError {
-		result.State = "nxdomain"
+		result.State = stateNXDomain
 		return result
 	}
 	if response.Rcode != dns.RcodeSuccess {
@@ -81,9 +81,9 @@ func LookupDNS(ctx context.Context, server, name, recordType string, expected []
 	sort.Strings(want)
 	want = slices.Compact(want)
 	if slices.Equal(result.Answers, want) {
-		result.State = "match"
+		result.State = stateMatch
 	} else {
-		result.State = "mismatch"
+		result.State = stateMismatch
 	}
 	return result
 }
