@@ -131,13 +131,13 @@ func recordsFor(object *externaldnsv1alpha1.DNSEndpoint, recordType string) []Re
 func observationState(generation, observed int64) string {
 	switch {
 	case observed == generation:
-		return "observed"
+		return stateObserved
 	case observed == 0:
 		return "unobserved"
 	case observed < generation:
 		return "stale"
 	default:
-		return "invalid"
+		return stateInvalid
 	}
 }
 
@@ -274,9 +274,9 @@ func (i Inspector) Status(ctx context.Context, controllerNamespace, controllerNa
 			sources[record.Source.Kind+"/"+record.Source.Namespace+"/"+record.Source.Name] = struct{}{}
 			result.Summary.PendingTargets += len(record.Retiring)
 			switch record.ExternalDNSState {
-			case "observed":
+			case stateObserved:
 				result.Summary.Observed++
-			case "invalid":
+			case stateInvalid:
 				result.Summary.Invalid++
 			default:
 				result.Summary.Stale++

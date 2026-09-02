@@ -18,6 +18,17 @@ package cli
 
 import "time"
 
+const (
+	stateCurrent     = "current"
+	stateMissing     = "missing"
+	stateObserved    = "observed"
+	stateInvalid     = "invalid"
+	stateUnsupported = "unsupported"
+	stateNXDomain    = "nxdomain"
+	stateMatch       = "match"
+	stateMismatch    = "mismatch"
+)
+
 type SourceRef struct {
 	Kind      string `json:"kind"`
 	Namespace string `json:"namespace"`

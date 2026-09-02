@@ -58,8 +58,16 @@ A matching answer proves only what the selected resolver currently returns; it
 does not prove the state of an underlying DNS provider.
 
 All commands accept `--kubeconfig`, `--context`, `--namespace`,
-`--request-timeout`, and `--output table|json`. JSON is a simple interface for
-lightweight `jq` use and is not currently a versioned compatibility API.
+`--request-timeout`, `--output table|json`, and `--color auto|always|never`.
+Colour defaults to `auto`: table output is coloured only when stdout is a
+terminal, `NO_COLOR` is unset or empty, and `TERM` is not `dumb`. `always`
+forces colour even when output is redirected, while `never` disables it.
+JSON output is always plain and is not currently a versioned compatibility API.
+Help, version, and error output are also always plain. The colour palette is
+semantic: green marks healthy/current/observed or fully ready values, yellow
+marks transitional or warning values, and red marks failures and invalid
+values. Ordinary identifiers, headings, names, targets, and other data remain
+uncoloured.
 
 `status` discovers Deployments with `app.kubernetes.io/name=labdns`. Customized
 installations can use `--controller-namespace` and `--controller-name`.

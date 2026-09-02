@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -36,10 +37,40 @@ import (
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	labdnsv1alpha1 "github.com/shednet/labdns/api/v1alpha1"
 	"github.com/shednet/labdns/internal/source"
 )
+
+type colorMode string
+
+const (
+	colorAuto   colorMode = "auto"
+	colorAlways colorMode = "always"
+	colorNever  colorMode = "never"
+)
+
+func (m *colorMode) Set(value string) error {
+	switch colorMode(value) {
+	case colorAuto, colorAlways, colorNever:
+		*m = colorMode(value)
+		return nil
+	default:
+		return fmt.Errorf("invalid color mode %q: use auto, always, or never", value)
+	}
+}
+
+func (m *colorMode) String() string {
+	if m == nil {
+		return ""
+	}
+	return string(*m)
+}
+
+func (m *colorMode) Type() string {
+	return "string"
+}
 
 type commandOptions struct {
 	kubeconfig string
@@ -50,10 +81,17 @@ type commandOptions struct {
 	provider   string
 	sourceKind string
 	recordType string
+	color      colorMode
+	getenv     func(string) (string, bool)
+	isTerminal func(io.Writer) bool
 }
 
 func NewCommand(version string, stdout, stderr io.Writer) *cobra.Command {
-	options := &commandOptions{}
+	return newCommand(version, stdout, stderr, os.LookupEnv, outputIsTerminal)
+}
+
+func newCommand(version string, stdout, stderr io.Writer, getenv func(string) (string, bool), isTerminal func(io.Writer) bool) *cobra.Command {
+	options := &commandOptions{color: colorAuto, getenv: getenv, isTerminal: isTerminal}
 	root := &cobra.Command{
 		Use:           "labdns",
 		Short:         "Inspect labdns publication state",
@@ -68,6 +106,7 @@ func NewCommand(version string, stdout, stderr io.Writer) *cobra.Command {
 	root.PersistentFlags().StringVarP(&options.namespace, "namespace", "n", "", "Limit inspection to a namespace")
 	root.PersistentFlags().StringVarP(&options.output, "output", "o", "table", "Output format: table or json")
 	root.PersistentFlags().DurationVar(&options.timeout, "request-timeout", 10*time.Second, "Timeout for Kubernetes and DNS requests")
+	root.PersistentFlags().Var(&options.color, "color", "Color table output: auto, always, or never")
 
 	root.AddCommand(newListCommand(options), newShowCommand(options), newStatusCommand(options))
 	return root
@@ -88,7 +127,9 @@ func newListCommand(options *commandOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return writeOutput(command.OutOrStdout(), options.output, result, func(writer io.Writer) error { return WriteRecords(writer, result) })
+			return writeOutput(command.OutOrStdout(), options.output, result, func(writer io.Writer) error {
+				return writeRecords(writer, result, options.colorizer(command))
+			})
 		},
 	}
 	addRecordFilters(command, options)
@@ -115,7 +156,9 @@ func newShowCommand(options *commandOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := writeOutput(command.OutOrStdout(), options.output, result, func(writer io.Writer) error { return WriteDetails(writer, result) }); err != nil {
+			if err := writeOutput(command.OutOrStdout(), options.output, result, func(writer io.Writer) error {
+				return writeDetails(writer, result, options.colorizer(command))
+			}); err != nil {
 				return err
 			}
 			for _, item := range result.Items {
@@ -148,7 +191,9 @@ func newStatusCommand(options *commandOptions) *cobra.Command {
 				selectedNamespace = options.namespace
 			}
 			result, failed := inspector.Status(ctx, selectedNamespace, controllerName)
-			if err := writeOutput(command.OutOrStdout(), options.output, result, func(writer io.Writer) error { return WriteStatus(writer, result) }); err != nil {
+			if err := writeOutput(command.OutOrStdout(), options.output, result, func(writer io.Writer) error {
+				return writeStatus(writer, result, options.colorizer(command))
+			}); err != nil {
 				return err
 			}
 			if failed {
@@ -201,6 +246,38 @@ func prepare(parent context.Context, options *commandOptions) (Inspector, contex
 	}
 	ctx, cancel := context.WithTimeout(parent, options.timeout)
 	return Inspector{Client: kubeClient, Discovery: discoveryClient}, ctx, cancel, nil
+}
+
+func (o *commandOptions) colorizer(command *cobra.Command) outputColorizer {
+	// Structured output is intended for machine consumption and must remain
+	// free of terminal control sequences regardless of the colour setting.
+	if strings.EqualFold(o.output, "json") {
+		return outputColorizer{}
+	}
+	switch o.color {
+	case colorNever:
+		return outputColorizer{}
+	case colorAlways:
+		return outputColorizer{enabled: true}
+	case colorAuto:
+		if o.getenv != nil {
+			if value, present := o.getenv("NO_COLOR"); present && value != "" {
+				return outputColorizer{}
+			}
+			if value, present := o.getenv("TERM"); present && strings.EqualFold(value, "dumb") {
+				return outputColorizer{}
+			}
+		}
+		if o.isTerminal != nil && o.isTerminal(command.OutOrStdout()) {
+			return outputColorizer{enabled: true}
+		}
+	}
+	return outputColorizer{}
+}
+
+func outputIsTerminal(writer io.Writer) bool {
+	file, ok := writer.(interface{ Fd() uintptr })
+	return ok && term.IsTerminal(int(file.Fd()))
 }
 
 func writeOutput(writer io.Writer, format string, value any, table func(io.Writer) error) error {
