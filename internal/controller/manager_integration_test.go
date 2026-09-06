@@ -18,10 +18,6 @@ package controller
 
 import (
 	"context"
-	"io"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -35,14 +31,11 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	controllerconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	externaldnsv1alpha1 "sigs.k8s.io/external-dns/apis/v1alpha1"
@@ -72,7 +65,7 @@ func (o *watchOutput) Apply(_ context.Context, identity source.Identity, publica
 	o.mu.Lock()
 	o.sequence++
 	sequence := o.sequence
-	o.latest[identity.Kind+"/"+identity.Namespace+"/"+identity.Name] = publications
+	o.latest[string(identity.Kind)+"/"+identity.Namespace+"/"+identity.Name] = publications
 	o.mu.Unlock()
 	select {
 	case o.events <- outputEvent{identity: identity, publications: publications, sequence: sequence}:
@@ -91,7 +84,7 @@ func (o *watchOutput) waitAfter(t *testing.T, sequence int, kind, name string, p
 	for {
 		select {
 		case event := <-o.events:
-			if event.sequence > sequence && event.identity.Kind == kind && event.identity.Name == name && predicate(event.publications) {
+			if event.sequence > sequence && event.identity.Kind == source.SourceKind(kind) && event.identity.Name == name && predicate(event.publications) {
 				return
 			}
 		case <-timer.C:
@@ -116,48 +109,13 @@ func (o *watchOutput) drain() {
 	}
 }
 
-func TestManagerWatchGraphAndDNSProviderAdmission(t *testing.T) { //nolint:gocyclo
-	environment := &envtest.Environment{CRDDirectoryPaths: []string{
-		filepath.Join("..", "..", "config", "crd", "bases"),
-		filepath.Join("..", "..", "test", "fixtures", "external-dns-v0.21.0"),
-		gatewayAPICRDPath(t),
-	}, ErrorIfCRDPathMissing: true}
-	config, err := environment.Start()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := environment.Stop(); err != nil {
-			t.Errorf("stop envtest: %v", err)
-		}
-	}()
-	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, labdnsv1alpha1.AddToScheme, externaldnsv1alpha1.AddToScheme, gatewayv1.Install, gatewayv1beta1.Install} {
-		if err := add(scheme); err != nil {
-			t.Fatal(err)
-		}
-	}
-	mgr, err := ctrl.NewManager(config, ctrl.Options{Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	output := newWatchOutput()
-	if err := Setup(context.Background(), mgr, output, true); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	managerErrors := make(chan error, 1)
-	go func() { managerErrors <- mgr.Start(ctx) }()
-	if !mgr.GetCache().WaitForCacheSync(ctx) {
-		t.Fatal("cache did not synchronize")
-	}
-	direct, err := client.New(config, client.Options{Scheme: scheme})
-	if err != nil {
-		t.Fatal(err)
-	}
-	validateExamplesThroughAPI(t, ctx, direct)
+func TestDNSProviderAdmission(t *testing.T) {
+	_, _, direct := sharedIntegration(t)
+	exerciseDNSProviderAdmission(t, context.Background(), direct)
+}
 
+func exerciseDNSProviderAdmission(t *testing.T, ctx context.Context, direct client.Client) {
+	t.Helper()
 	tooLongName := &labdnsv1alpha1.DNSProvider{ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 32) + "." + strings.Repeat("b", 32)}, Spec: validProviderSpec()}
 	if err := direct.Create(ctx, tooLongName); err == nil || !apierrors.IsInvalid(err) {
 		t.Fatalf("overlong metadata.name admission error = %v", err)
@@ -200,92 +158,147 @@ func TestManagerWatchGraphAndDNSProviderAdmission(t *testing.T) { //nolint:gocyc
 			}
 		})
 	}
-	provider := &labdnsv1alpha1.DNSProvider{ObjectMeta: metav1.ObjectMeta{Name: "www"}, Spec: labdnsv1alpha1.DNSProviderSpec{Zones: []labdnsv1alpha1.DNSZone{{Name: "example.com"}}, IPSources: labdnsv1alpha1.IPSources{IPv4: &labdnsv1alpha1.NodeLabelSource{NodeLabel: "network.example/ip"}}}}
-	if err := direct.Create(ctx, provider); err != nil {
+}
+
+type managerWatchFixture struct {
+	ctx              context.Context
+	direct           client.Client
+	output           *watchOutput
+	ingressClassName string
+	nodeName         string
+	nodeNameTwo      string
+}
+
+func TestManagerWatchGraph(t *testing.T) {
+	fixture := newManagerWatchFixture(t)
+	t.Run("Ingress validation", func(t *testing.T) { exerciseManagerWatchIngressValidation(t, fixture) })
+	t.Run("Ingress dependencies", func(t *testing.T) { exerciseManagerWatchIngressDependencies(t, fixture) })
+	t.Run("Gateway", func(t *testing.T) { exerciseManagerWatchGateway(t, fixture) })
+}
+
+func newManagerWatchFixture(t *testing.T) *managerWatchFixture {
+	t.Helper()
+	config, scheme, direct := sharedIntegration(t)
+	// Register resource cleanup before startManagedTestManager registers manager
+	// shutdown, so the manager is stopped before cleanup talks to the API.
+	t.Cleanup(func() {
+		cleanupSharedNamespaces(t, "app", "backend")
+		cleanupSharedClusterObjects(t, []string{"www", "encoded-v6"}, []string{"public"}, []string{"class", "second"})
+		cleanupSharedNodes(t, "worker", "worker-two")
+	})
+	mgr, err := ctrl.NewManager(config, ctrl.Options{
+		Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0",
+		Controller: controllerconfig.Controller{SkipNameValidation: new(true)},
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
+	ctx := context.Background()
+	output := newWatchOutput()
+	if err := Setup(ctx, mgr, output, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	startManagedTestManager(t, mgr, ctx)
+
+	provider := &labdnsv1alpha1.DNSProvider{
+		ObjectMeta: metav1.ObjectMeta{Name: "www"},
+		Spec: labdnsv1alpha1.DNSProviderSpec{
+			Zones: []labdnsv1alpha1.DNSZone{{Name: "example.com"}},
+			IPSources: labdnsv1alpha1.IPSources{
+				IPv4: &labdnsv1alpha1.NodeLabelSource{NodeLabel: "network.example/ip"},
+			},
+		},
+	}
+	createManagerWatchObject(t, ctx, direct, provider)
 	if provider.Spec.RecordDefaults.TTL != 300 || provider.Spec.RecordDefaults.DeletionDelay == nil || provider.Spec.RecordDefaults.DeletionDelay.Duration != time.Minute {
 		t.Fatalf("defaults not applied: %#v", provider.Spec.RecordDefaults)
 	}
-	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "app"}}
-	if err := direct.Create(ctx, namespace); err != nil {
-		t.Fatal(err)
-	}
-	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "app"}, Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 80}}}}
-	if err := direct.Create(ctx, service); err != nil {
-		t.Fatal(err)
-	}
-	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker", Labels: map[string]string{"network.example/ip": "192.0.2.1", "network.example/ip-next": "192.0.2.9"}}}
-	if err := direct.Create(ctx, node); err != nil {
-		t.Fatal(err)
-	}
-	nodeName := "worker"
-	slice := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "app", Labels: map[string]string{discoveryv1.LabelServiceName: "api"}}, AddressType: discoveryv1.AddressTypeIPv4, Endpoints: []discoveryv1.Endpoint{{NodeName: &nodeName, Addresses: []string{"10.0.0.1"}}}}
-	if err := direct.Create(ctx, slice); err != nil {
-		t.Fatal(err)
-	}
-	serviceTwo := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "api-two", Namespace: "app"}, Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 80}}}}
-	if err := direct.Create(ctx, serviceTwo); err != nil {
-		t.Fatal(err)
-	}
-	nodeTwo := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-two", Labels: map[string]string{"network.example/ip": "198.51.100.1", "network.example/ip-next": "198.51.100.9"}}}
-	if err := direct.Create(ctx, nodeTwo); err != nil {
-		t.Fatal(err)
-	}
-	nodeNameTwo := "worker-two"
-	sliceTwo := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: "api-two", Namespace: "app", Labels: map[string]string{discoveryv1.LabelServiceName: "api-two"}}, AddressType: discoveryv1.AddressTypeIPv4, Endpoints: []discoveryv1.Endpoint{{NodeName: &nodeNameTwo, Addresses: []string{"10.0.0.2"}}}}
-	if err := direct.Create(ctx, sliceTwo); err != nil {
-		t.Fatal(err)
-	}
-	ingressClass := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "public", Annotations: map[string]string{source.EnabledAnnotation: "true", source.ProvidersAnnotation: "www"}}, Spec: networkingv1.IngressClassSpec{Controller: "example.test/controller"}}
-	if err := direct.Create(ctx, ingressClass); err != nil {
-		t.Fatal(err)
-	}
-	ingressClassName := "public"
-	ingress := &networkingv1.Ingress{
+	createManagerWatchObject(t, ctx, direct, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "app"}})
+	createManagerWatchObject(t, ctx, direct, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "app"},
+		Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 80}}},
+	})
+	createManagerWatchObject(t, ctx, direct, &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker", Labels: map[string]string{"network.example/ip": "192.0.2.1", "network.example/ip-next": "192.0.2.9"}},
+	})
+	createManagerWatchObject(t, ctx, direct, &discoveryv1.EndpointSlice{
+		ObjectMeta:  metav1.ObjectMeta{Name: "api", Namespace: "app", Labels: map[string]string{discoveryv1.LabelServiceName: "api"}},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints:   []discoveryv1.Endpoint{{NodeName: new("worker"), Addresses: []string{"10.0.0.1"}}},
+	})
+	createManagerWatchObject(t, ctx, direct, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "api-two", Namespace: "app"},
+		Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 80}}},
+	})
+	createManagerWatchObject(t, ctx, direct, &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker-two", Labels: map[string]string{"network.example/ip": "198.51.100.1", "network.example/ip-next": "198.51.100.9"}},
+	})
+	createManagerWatchObject(t, ctx, direct, &discoveryv1.EndpointSlice{
+		ObjectMeta:  metav1.ObjectMeta{Name: "api-two", Namespace: "app", Labels: map[string]string{discoveryv1.LabelServiceName: "api-two"}},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints:   []discoveryv1.Endpoint{{NodeName: new("worker-two"), Addresses: []string{"10.0.0.2"}}},
+	})
+	createManagerWatchObject(t, ctx, direct, &networkingv1.IngressClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "public", Annotations: map[string]string{source.EnabledAnnotation: "true", source.ProvidersAnnotation: "www"}},
+		Spec:       networkingv1.IngressClassSpec{Controller: "example.test/controller"},
+	})
+	className := "public"
+	createManagerWatchObject(t, ctx, direct, &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "app"},
 		Spec: networkingv1.IngressSpec{
-			IngressClassName: &ingressClassName,
+			IngressClassName: &className,
 			Rules: []networkingv1.IngressRule{
 				ingressRule("app.example.com", "api"),
 				ingressRule("two.example.com", "api-two"),
 			},
 		},
-	}
-	if err := direct.Create(ctx, ingress); err != nil {
+	})
+	output.wait(t, "Ingress", "web", hostTargetsAre(map[string][]string{"app.example.com": {"192.0.2.1"}, "two.example.com": {"198.51.100.1"}}))
+	return &managerWatchFixture{ctx: ctx, direct: direct, output: output, ingressClassName: className, nodeName: "worker", nodeNameTwo: "worker-two"}
+}
+
+func createManagerWatchObject(t *testing.T, ctx context.Context, direct client.Client, object client.Object) {
+	t.Helper()
+	if err := direct.Create(ctx, object); err != nil {
 		t.Fatal(err)
 	}
-	output.wait(t, "Ingress", "web", hostTargetsAre(map[string][]string{"app.example.com": {"192.0.2.1"}, "two.example.com": {"198.51.100.1"}}))
+}
 
-	if err := direct.Get(ctx, client.ObjectKey{Name: "worker"}, node); err != nil {
+func exerciseManagerWatchIngressValidation(t *testing.T, f *managerWatchFixture) {
+	t.Helper()
+	ctx, direct, output := f.ctx, f.direct, f.output
+	node := &corev1.Node{}
+	if err := direct.Get(ctx, client.ObjectKey{Name: f.nodeName}, node); err != nil {
 		t.Fatal(err)
 	}
 	node.Labels["network.example/ipv6"] = "v6-2001-db8--1"
 	if err := direct.Update(ctx, node); err != nil {
 		t.Fatalf("Kubernetes API rejected encoded IPv6 Node label: %v", err)
 	}
-	ipv6Provider := &labdnsv1alpha1.DNSProvider{ObjectMeta: metav1.ObjectMeta{Name: "encoded-v6"}, Spec: labdnsv1alpha1.DNSProviderSpec{Zones: []labdnsv1alpha1.DNSZone{{Name: "example.com"}}, IPSources: labdnsv1alpha1.IPSources{IPv6: &labdnsv1alpha1.NodeLabelSource{NodeLabel: "network.example/ipv6"}}}}
-	if err := direct.Create(ctx, ipv6Provider); err != nil {
-		t.Fatal(err)
-	}
-	ipv6Ingress := &networkingv1.Ingress{
+	createManagerWatchObject(t, ctx, direct, &labdnsv1alpha1.DNSProvider{
+		ObjectMeta: metav1.ObjectMeta{Name: "encoded-v6"},
+		Spec: labdnsv1alpha1.DNSProviderSpec{
+			Zones: []labdnsv1alpha1.DNSZone{{Name: "example.com"}},
+			IPSources: labdnsv1alpha1.IPSources{
+				IPv6: &labdnsv1alpha1.NodeLabelSource{NodeLabel: "network.example/ipv6"},
+			},
+		},
+	})
+	createManagerWatchObject(t, ctx, direct, &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{Name: "ipv6", Namespace: "app", Annotations: map[string]string{source.EnabledAnnotation: "true", source.ProvidersAnnotation: "encoded-v6"}},
 		Spec:       networkingv1.IngressSpec{Rules: []networkingv1.IngressRule{ingressRule("ipv6.example.com", "api")}},
-	}
-	if err := direct.Create(ctx, ipv6Ingress); err != nil {
-		t.Fatal(err)
-	}
+	})
 	output.wait(t, "Ingress", "ipv6", func(publications []source.Publication) bool {
 		return len(publications) == 1 && len(publications[0].Records) == 1 && publications[0].Records[0].RecordType == "AAAA" && reflect.DeepEqual(publications[0].Records[0].Targets, []string{"2001:db8::1"})
 	})
 
 	ipv6StableOutput := &recordingOutput{}
-	ipv6Reconciler := &IngressReconciler{Client: direct, Output: ipv6StableOutput, Resolver: source.Resolver{Reader: direct}}
+	ipv6Reconciler := &ingressReconciler{Client: direct, Output: ipv6StableOutput, Resolver: source.Resolver{Reader: direct}}
 	ipv6Request := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "app", Name: "ipv6"}}
 	if _, err := ipv6Reconciler.Reconcile(ctx, ipv6Request); err != nil {
 		t.Fatal(err)
 	}
-	if err := direct.Get(ctx, client.ObjectKey{Name: "worker"}, node); err != nil {
+	if err := direct.Get(ctx, client.ObjectKey{Name: f.nodeName}, node); err != nil {
 		t.Fatal(err)
 	}
 	node.Labels["network.example/ipv6"] = "v6-2001-0db8--1"
@@ -304,7 +317,7 @@ func TestManagerWatchGraphAndDNSProviderAdmission(t *testing.T) { //nolint:gocyc
 	}
 
 	stableOutput := &recordingOutput{}
-	directReconciler := &IngressReconciler{Client: direct, Output: stableOutput, Resolver: source.Resolver{Reader: direct}}
+	directReconciler := &ingressReconciler{Client: direct, Output: stableOutput, Resolver: source.Resolver{Reader: direct}}
 	request := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "app", Name: "web"}}
 	if _, err := directReconciler.Reconcile(ctx, request); err != nil {
 		t.Fatal(err)
@@ -327,27 +340,41 @@ func TestManagerWatchGraphAndDNSProviderAdmission(t *testing.T) { //nolint:gocyc
 	if stableOutput.calls != 1 || !reflect.DeepEqual(stableOutput.publications, stablePublications) {
 		t.Fatalf("transient read failure altered output: calls=%d publications=%#v", stableOutput.calls, stableOutput.publications)
 	}
+}
 
-	oldLabelIngress := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: "old-label", Namespace: "app"}, Spec: networkingv1.IngressSpec{
-		IngressClassName: &ingressClassName, Rules: []networkingv1.IngressRule{ingressRule("old.example.com", "api")},
-	}}
-	if err := direct.Create(ctx, oldLabelIngress); err != nil {
-		t.Fatal(err)
-	}
+func exerciseManagerWatchIngressDependencies(t *testing.T, f *managerWatchFixture) {
+	t.Helper()
+	exerciseManagerWatchServiceAndClass(t, f)
+	exerciseManagerWatchEndpointSlice(t, f)
+	exerciseManagerWatchNodeAndProvider(t, f)
+}
+
+func exerciseManagerWatchServiceAndClass(t *testing.T, f *managerWatchFixture) {
+	t.Helper()
+	ctx, direct, output := f.ctx, f.direct, f.output
+	createManagerWatchObject(t, ctx, direct, &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Name: "old-label", Namespace: "app"},
+		Spec: networkingv1.IngressSpec{
+			IngressClassName: &f.ingressClassName,
+			Rules:            []networkingv1.IngressRule{ingressRule("old.example.com", "api")},
+		},
+	})
 	output.wait(t, "Ingress", "old-label", hostTargetsAre(map[string][]string{"old.example.com": {"192.0.2.1"}}))
 
 	output.drain()
 	serviceSequence := output.mark()
+	service := &corev1.Service{}
 	if err := direct.Get(ctx, client.ObjectKey{Namespace: "app", Name: "api"}, service); err != nil {
 		t.Fatal(err)
 	}
 	service.Annotations = map[string]string{"example.test/mutated": "true"}
 	if err := direct.Update(ctx, service); err != nil {
-		t.Fatal(err)
+		t.Fatalf("Kubernetes API rejected metadata-only Service update: %v", err)
 	}
 	output.waitAfter(t, serviceSequence, "Ingress", "old-label", hostTargetsAre(map[string][]string{"old.example.com": {"192.0.2.1"}}))
 
 	output.drain()
+	ingressClass := &networkingv1.IngressClass{}
 	if err := direct.Get(ctx, client.ObjectKey{Name: "public"}, ingressClass); err != nil {
 		t.Fatal(err)
 	}
@@ -359,24 +386,32 @@ func TestManagerWatchGraphAndDNSProviderAdmission(t *testing.T) { //nolint:gocyc
 
 	output.drain()
 	endpointSequence := output.mark()
-	generated := &externaldnsv1alpha1.DNSEndpoint{ObjectMeta: metav1.ObjectMeta{Name: "generated-watch", Namespace: "app", Annotations: map[string]string{
-		source.AnnotationPrefix + "source-kind": "Ingress", source.AnnotationPrefix + "source-namespace": "app", source.AnnotationPrefix + "source-name": "web",
-	}}}
-	if err := direct.Create(ctx, generated); err != nil {
-		t.Fatal(err)
-	}
+	createManagerWatchObject(t, ctx, direct, &externaldnsv1alpha1.DNSEndpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "generated-watch", Namespace: "app",
+			Annotations: map[string]string{
+				source.AnnotationPrefix + "source-kind":      "Ingress",
+				source.AnnotationPrefix + "source-namespace": "app",
+				source.AnnotationPrefix + "source-name":      "web",
+			},
+		},
+	})
 	output.waitAfter(t, endpointSequence, "Ingress", "web", hostTargetsAre(map[string][]string{"app.example.com": {"192.0.2.1"}, "two.example.com": {"198.51.100.1"}}))
+}
 
-	output.drain()
+func exerciseManagerWatchEndpointSlice(t *testing.T, f *managerWatchFixture) {
+	t.Helper()
+	ctx, direct, output := f.ctx, f.direct, f.output
+	slice := &discoveryv1.EndpointSlice{}
 	if err := direct.Get(ctx, client.ObjectKey{Namespace: "app", Name: "api"}, slice); err != nil {
 		t.Fatal(err)
 	}
-	slice.Endpoints[0].NodeName = &nodeNameTwo
+	slice.Endpoints[0].NodeName = &f.nodeNameTwo
 	if err := direct.Update(ctx, slice); err != nil {
 		t.Fatal(err)
 	}
 	output.wait(t, "Ingress", "old-label", hostTargetsAre(map[string][]string{"old.example.com": {"198.51.100.1"}}))
-	slice.Endpoints[0].NodeName = &nodeName
+	slice.Endpoints[0].NodeName = &f.nodeName
 	if err := direct.Update(ctx, slice); err != nil {
 		t.Fatal(err)
 	}
@@ -403,13 +438,19 @@ func TestManagerWatchGraphAndDNSProviderAdmission(t *testing.T) { //nolint:gocyc
 	output.wait(t, "Ingress", "old-label", func(publications []source.Publication) bool {
 		return len(publications) == 1 && len(publications[0].Records) == 0
 	})
-	slice = &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "app", Labels: map[string]string{discoveryv1.LabelServiceName: "api"}}, AddressType: discoveryv1.AddressTypeIPv4, Endpoints: []discoveryv1.Endpoint{{NodeName: &nodeName, Addresses: []string{"10.0.0.1"}}}}
-	if err := direct.Create(ctx, slice); err != nil {
-		t.Fatal(err)
-	}
+	createManagerWatchObject(t, ctx, direct, &discoveryv1.EndpointSlice{
+		ObjectMeta:  metav1.ObjectMeta{Name: "api", Namespace: "app", Labels: map[string]string{discoveryv1.LabelServiceName: "api"}},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints:   []discoveryv1.Endpoint{{NodeName: &f.nodeName, Addresses: []string{"10.0.0.1"}}},
+	})
 	output.wait(t, "Ingress", "old-label", hostTargetsAre(map[string][]string{"old.example.com": {"192.0.2.1"}}))
+}
 
-	if err := direct.Get(ctx, client.ObjectKey{Name: "worker"}, node); err != nil {
+func exerciseManagerWatchNodeAndProvider(t *testing.T, f *managerWatchFixture) {
+	t.Helper()
+	ctx, direct, output := f.ctx, f.direct, f.output
+	node := &corev1.Node{}
+	if err := direct.Get(ctx, client.ObjectKey{Name: f.nodeName}, node); err != nil {
 		t.Fatal(err)
 	}
 	node.Labels["network.example/ip"] = "192.0.2.2"
@@ -417,6 +458,7 @@ func TestManagerWatchGraphAndDNSProviderAdmission(t *testing.T) { //nolint:gocyc
 		t.Fatal(err)
 	}
 	output.wait(t, "Ingress", "web", targetIs("192.0.2.2"))
+	slice := &discoveryv1.EndpointSlice{}
 	if err := direct.Get(ctx, client.ObjectKey{Namespace: "app", Name: "api"}, slice); err != nil {
 		t.Fatal(err)
 	}
@@ -433,6 +475,7 @@ func TestManagerWatchGraphAndDNSProviderAdmission(t *testing.T) { //nolint:gocyc
 		t.Fatal(err)
 	}
 	output.wait(t, "Ingress", "web", targetIs("192.0.2.2"))
+	provider := &labdnsv1alpha1.DNSProvider{}
 	if err := direct.Get(ctx, client.ObjectKey{Name: "www"}, provider); err != nil {
 		t.Fatal(err)
 	}
@@ -441,29 +484,41 @@ func TestManagerWatchGraphAndDNSProviderAdmission(t *testing.T) { //nolint:gocyc
 		t.Fatal(err)
 	}
 	output.wait(t, "Ingress", "web", targetIs("192.0.2.9"))
+}
 
-	class := &gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "class", Annotations: map[string]string{source.EnabledAnnotation: "true", source.ProvidersAnnotation: "www"}}, Spec: gatewayv1.GatewayClassSpec{ControllerName: "example.test/controller"}}
-	if err := direct.Create(ctx, class); err != nil {
-		t.Fatal(err)
-	}
-	gateway := &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "gateway", Namespace: "app"}, Spec: gatewayv1.GatewaySpec{GatewayClassName: "class", Listeners: []gatewayv1.Listener{{Name: "http", Protocol: gatewayv1.HTTPProtocolType, Port: 80}}}}
-	if err := direct.Create(ctx, gateway); err != nil {
-		t.Fatal(err)
-	}
+func exerciseManagerWatchGateway(t *testing.T, f *managerWatchFixture) {
+	t.Helper()
+	exerciseManagerWatchGatewaySources(t, f)
+	exerciseManagerWatchGatewayCrossNamespace(t, f)
+	exerciseManagerWatchGatewayEvents(t, f)
+}
+
+func exerciseManagerWatchGatewaySources(t *testing.T, f *managerWatchFixture) {
+	t.Helper()
+	ctx, direct, output := f.ctx, f.direct, f.output
+	createManagerWatchObject(t, ctx, direct, &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "class", Annotations: map[string]string{source.EnabledAnnotation: "true", source.ProvidersAnnotation: "www"}},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: "example.test/controller"},
+	})
+	createManagerWatchObject(t, ctx, direct, &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gateway", Namespace: "app"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "class", Listeners: []gatewayv1.Listener{{Name: "http", Protocol: gatewayv1.HTTPProtocolType, Port: 80}}},
+	})
 	port80 := gatewayv1.PortNumber(80)
-	route := &gatewayv1.HTTPRoute{
+	createManagerWatchObject(t, ctx, direct, &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "app"},
 		Spec: gatewayv1.HTTPRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: []gatewayv1.ParentReference{{Name: "gateway"}}},
 			Hostnames:       []gatewayv1.Hostname{"route.example.com"},
-			Rules:           []gatewayv1.HTTPRouteRule{{BackendRefs: []gatewayv1.HTTPBackendRef{{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "api", Port: &port80}}}}}},
+			Rules: []gatewayv1.HTTPRouteRule{{BackendRefs: []gatewayv1.HTTPBackendRef{{BackendRef: gatewayv1.BackendRef{
+				BackendObjectReference: gatewayv1.BackendObjectReference{Name: "api", Port: &port80},
+			}}}}},
 		},
-	}
-	if err := direct.Create(ctx, route); err != nil {
-		t.Fatal(err)
-	}
+	})
 	output.wait(t, "HTTPRoute", "route", targetIs("192.0.2.9"))
+
 	output.drain()
+	gateway := &gatewayv1.Gateway{}
 	if err := direct.Get(ctx, client.ObjectKey{Namespace: "app", Name: "gateway"}, gateway); err != nil {
 		t.Fatal(err)
 	}
@@ -472,164 +527,99 @@ func TestManagerWatchGraphAndDNSProviderAdmission(t *testing.T) { //nolint:gocyc
 		t.Fatal(err)
 	}
 	output.wait(t, "HTTPRoute", "route", metadataAnnotationIs(source.ExternalDNSPrefix+"gateway-marker", "gateway"))
-	backendNamespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "backend"}}
-	if err := direct.Create(ctx, backendNamespace); err != nil {
-		t.Fatal(err)
-	}
-	backendService := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "cross", Namespace: "backend"}, Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 80}}}}
-	if err := direct.Create(ctx, backendService); err != nil {
-		t.Fatal(err)
-	}
-	backendSlice := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: "cross", Namespace: "backend", Labels: map[string]string{discoveryv1.LabelServiceName: "cross"}}, AddressType: discoveryv1.AddressTypeIPv4, Endpoints: []discoveryv1.Endpoint{{NodeName: &nodeName, Addresses: []string{"10.0.0.2"}}}}
-	if err := direct.Create(ctx, backendSlice); err != nil {
-		t.Fatal(err)
-	}
-	crossRoute := &gatewayv1.HTTPRoute{
+}
+
+func exerciseManagerWatchGatewayCrossNamespace(t *testing.T, f *managerWatchFixture) {
+	t.Helper()
+	ctx, direct, output := f.ctx, f.direct, f.output
+	createManagerWatchObject(t, ctx, direct, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "backend"}})
+	createManagerWatchObject(t, ctx, direct, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "cross", Namespace: "backend"},
+		Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 80}}},
+	})
+	createManagerWatchObject(t, ctx, direct, &discoveryv1.EndpointSlice{
+		ObjectMeta:  metav1.ObjectMeta{Name: "cross", Namespace: "backend", Labels: map[string]string{discoveryv1.LabelServiceName: "cross"}},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints:   []discoveryv1.Endpoint{{NodeName: &f.nodeName, Addresses: []string{"10.0.0.2"}}},
+	})
+	port80 := gatewayv1.PortNumber(80)
+	createManagerWatchObject(t, ctx, direct, &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "cross", Namespace: "app"},
 		Spec: gatewayv1.HTTPRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: []gatewayv1.ParentReference{{Name: "gateway"}}},
 			Hostnames:       []gatewayv1.Hostname{"cross.example.com"},
-			Rules: []gatewayv1.HTTPRouteRule{{BackendRefs: []gatewayv1.HTTPBackendRef{{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{
-				Name: "cross", Namespace: ptr.To(gatewayv1.Namespace("backend")), Port: &port80,
-			}}}}}},
+			Rules: []gatewayv1.HTTPRouteRule{{BackendRefs: []gatewayv1.HTTPBackendRef{{BackendRef: gatewayv1.BackendRef{
+				BackendObjectReference: gatewayv1.BackendObjectReference{Name: "cross", Namespace: ptr.To(gatewayv1.Namespace("backend")), Port: &port80},
+			}}}}},
 		},
-	}
-	if err := direct.Create(ctx, crossRoute); err != nil {
-		t.Fatal(err)
-	}
+	})
 	output.wait(t, "HTTPRoute", "cross", func(publications []source.Publication) bool {
 		return len(publications) == 1 && len(publications[0].Records) == 0
 	})
-	grant := &gatewayv1beta1.ReferenceGrant{ObjectMeta: metav1.ObjectMeta{Name: "allow-cross", Namespace: "backend"}, Spec: gatewayv1beta1.ReferenceGrantSpec{From: []gatewayv1beta1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Namespace: "app"}}, To: []gatewayv1beta1.ReferenceGrantTo{{Group: "", Kind: "Service", Name: ptr.To(gatewayv1beta1.ObjectName("cross"))}}}}
-	if err := direct.Create(ctx, grant); err != nil {
+	createManagerWatchObject(t, ctx, direct, &gatewayv1beta1.ReferenceGrant{
+		ObjectMeta: metav1.ObjectMeta{Name: "allow-cross", Namespace: "backend"},
+		Spec: gatewayv1beta1.ReferenceGrantSpec{
+			From: []gatewayv1beta1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Namespace: "app"}},
+			To:   []gatewayv1beta1.ReferenceGrantTo{{Group: "", Kind: "Service", Name: ptr.To(gatewayv1beta1.ObjectName("cross"))}},
+		},
+	})
+	output.wait(t, "HTTPRoute", "cross", targetIs("192.0.2.9"))
+
+	output.drain()
+	grant := &gatewayv1beta1.ReferenceGrant{}
+	if err := direct.Get(ctx, client.ObjectKey{Namespace: "backend", Name: "allow-cross"}, grant); err != nil {
 		t.Fatal(err)
 	}
-	output.wait(t, "HTTPRoute", "cross", targetIs("192.0.2.9"))
-	output.drain()
 	if err := direct.Delete(ctx, grant); err != nil {
 		t.Fatal(err)
 	}
 	output.wait(t, "HTTPRoute", "cross", func(publications []source.Publication) bool {
 		return len(publications) == 1 && len(publications[0].Records) == 0
 	})
-	tlsIngress := &networkingv1.Ingress{
+}
+
+func exerciseManagerWatchGatewayEvents(t *testing.T, f *managerWatchFixture) {
+	t.Helper()
+	ctx, direct, output := f.ctx, f.direct, f.output
+	createManagerWatchObject(t, ctx, direct, &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{Name: "tls-only", Namespace: "app"},
 		Spec: networkingv1.IngressSpec{
-			IngressClassName: &ingressClassName,
+			IngressClassName: &f.ingressClassName,
 			Rules:            []networkingv1.IngressRule{ingressRule("tls-rule.example.com", "api")},
 			TLS:              []networkingv1.IngressTLS{{Hosts: []string{"tls.example.com"}}},
 		},
-	}
-	if err := direct.Create(ctx, tlsIngress); err != nil {
-		t.Fatal(err)
-	}
+	})
 	output.wait(t, "Ingress", "tls-only", func(publications []source.Publication) bool {
 		return hostTargetsAre(map[string][]string{"tls-rule.example.com": {"192.0.2.9"}})(publications)
 	})
 	waitForEventReason(t, ctx, direct, "app", "tls-only", "TLSHostWithoutBackend")
-	secondClass := &gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "second", Annotations: map[string]string{source.ProvidersAnnotation: "vpn"}}, Spec: gatewayv1.GatewayClassSpec{ControllerName: "example.test/controller"}}
-	if err := direct.Create(ctx, secondClass); err != nil {
-		t.Fatal(err)
-	}
-	secondGateway := &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "second", Namespace: "app"}, Spec: gatewayv1.GatewaySpec{GatewayClassName: "second", Listeners: []gatewayv1.Listener{{Name: "http", Protocol: gatewayv1.HTTPProtocolType, Port: 80}}}}
-	if err := direct.Create(ctx, secondGateway); err != nil {
-		t.Fatal(err)
-	}
-	ambiguous := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: "ambiguous", Namespace: "app"}, Spec: gatewayv1.HTTPRouteSpec{CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: []gatewayv1.ParentReference{{Name: "gateway"}, {Name: "second"}}}, Hostnames: []gatewayv1.Hostname{"ambiguous.example.com"}}}
-	if err := direct.Create(ctx, ambiguous); err != nil {
-		t.Fatal(err)
-	}
+
+	createManagerWatchObject(t, ctx, direct, &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "second", Annotations: map[string]string{source.ProvidersAnnotation: "vpn"}},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: "example.test/controller"},
+	})
+	createManagerWatchObject(t, ctx, direct, &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "second", Namespace: "app"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "second", Listeners: []gatewayv1.Listener{{Name: "http", Protocol: gatewayv1.HTTPProtocolType, Port: 80}}},
+	})
+	createManagerWatchObject(t, ctx, direct, &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "ambiguous", Namespace: "app"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: []gatewayv1.ParentReference{{Name: "gateway"}, {Name: "second"}}},
+			Hostnames:       []gatewayv1.Hostname{"ambiguous.example.com"},
+		},
+	})
 	waitForEventReason(t, ctx, direct, "app", "ambiguous", "AmbiguousParents")
+
+	class := &gatewayv1.GatewayClass{}
+	if err := direct.Get(ctx, client.ObjectKey{Name: "class"}, class); err != nil {
+		t.Fatal(err)
+	}
 	class.Annotations[source.ProvidersAnnotation] = ""
 	if err := direct.Update(ctx, class); err != nil {
 		t.Fatal(err)
 	}
 	output.wait(t, "HTTPRoute", "route", func(publications []source.Publication) bool { return len(publications) == 0 })
-
-	cancel()
-	select {
-	case err := <-managerErrors:
-		if err != nil {
-			t.Fatalf("manager: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("manager did not stop")
-	}
-}
-
-func gatewayAPICRDPath(t *testing.T) string {
-	t.Helper()
-	output, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "sigs.k8s.io/gateway-api").Output()
-	if err != nil {
-		t.Fatalf("locate Gateway API module: %v", err)
-	}
-	moduleDir := strings.TrimSpace(string(output))
-	if moduleDir == "" {
-		t.Fatal("Gateway API module has no local directory")
-	}
-	return filepath.Join(moduleDir, "config", "crd", "standard")
-}
-
-func validateExamplesThroughAPI(t *testing.T, ctx context.Context, kubeClient client.Client) {
-	t.Helper()
-	providersFile, err := os.Open(filepath.Join("..", "..", "examples", "dnsproviders.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	decoder := utilyaml.NewYAMLOrJSONDecoder(providersFile, 4096)
-	providers := []*labdnsv1alpha1.DNSProvider{}
-	for {
-		provider := &labdnsv1alpha1.DNSProvider{}
-		if err := decoder.Decode(provider); err != nil {
-			if err == io.EOF {
-				break
-			}
-			t.Fatalf("decode DNSProvider example: %v", err)
-		}
-		if provider.Name == "" {
-			continue
-		}
-		if err := kubeClient.Create(ctx, provider); err != nil {
-			t.Fatalf("DNSProvider example %q rejected by API admission: %v", provider.Name, err)
-		}
-		providers = append(providers, provider)
-	}
-	if len(providers) != 2 {
-		t.Fatalf("decoded %d DNSProvider examples, want 2", len(providers))
-	}
-	if err := providersFile.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	ingressFile, err := os.Open(filepath.Join("..", "..", "examples", "ingress-split-horizon.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ingress := &networkingv1.Ingress{}
-	if err := utilyaml.NewYAMLOrJSONDecoder(ingressFile, 4096).Decode(ingress); err != nil {
-		t.Fatalf("decode Ingress example through typed client: %v", err)
-	}
-	if err := ingressFile.Close(); err != nil {
-		t.Fatal(err)
-	}
-	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ingress.Namespace}}
-	if err := kubeClient.Create(ctx, namespace); err != nil {
-		t.Fatalf("create example namespace: %v", err)
-	}
-	if err := kubeClient.Create(ctx, ingress); err != nil {
-		t.Fatalf("Ingress example rejected by Kubernetes API: %v", err)
-	}
-	if err := kubeClient.Delete(ctx, ingress); err != nil {
-		t.Fatal(err)
-	}
-	for _, provider := range providers {
-		if err := kubeClient.Delete(ctx, provider); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := kubeClient.Delete(ctx, namespace); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func invalidProviderSpecs() map[string]labdnsv1alpha1.DNSProviderSpec {

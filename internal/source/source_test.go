@@ -18,6 +18,7 @@ package source
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -71,14 +72,24 @@ func TestInvalidAnnotations(t *testing.T) {
 	}
 }
 
+func TestInvalidErrorsRemainDetectableThroughContext(t *testing.T) {
+	_, err := NormalizeHostname("bad.*.example.com")
+	if !IsInvalid(err) {
+		t.Fatalf("error = %v, want invalid source error", err)
+	}
+	if wrapped := fmt.Errorf("normalize hostname: %w", err); !IsInvalid(wrapped) {
+		t.Fatalf("wrapped error = %v, want invalid source error", wrapped)
+	}
+}
+
 func TestMatchingZoneUsesLabelBoundaryAndLongestSuffix(t *testing.T) {
-	if got := MatchingZone("App.Dev.Example.com.", []string{"example.com", "dev.example.com"}); got != "dev.example.com" {
+	if got := matchingZone("App.Dev.Example.com.", []string{"example.com", "dev.example.com"}); got != "dev.example.com" {
 		t.Fatalf("got %q", got)
 	}
-	if got := MatchingZone("notexample.com", []string{"example.com"}); got != "" {
+	if got := matchingZone("notexample.com", []string{"example.com"}); got != "" {
 		t.Fatalf("boundary match returned %q", got)
 	}
-	if got := MatchingZone("*.example.com", []string{"example.com"}); got != "example.com" {
+	if got := matchingZone("*.example.com", []string{"example.com"}); got != "example.com" {
 		t.Fatalf("wildcard got %q", got)
 	}
 }
@@ -179,7 +190,7 @@ func TestResolverUsesReadyEndpointNodesAndNodeLabels(t *testing.T) {
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objects...).Build()
 	provider := &labdnsv1alpha1.DNSProvider{ObjectMeta: metav1.ObjectMeta{Name: "www"}, Spec: labdnsv1alpha1.DNSProviderSpec{Zones: []labdnsv1alpha1.DNSZone{{Name: "example.com"}}, IPSources: labdnsv1alpha1.IPSources{IPv4: &labdnsv1alpha1.NodeLabelSource{NodeLabel: "example.test/v4"}, IPv6: &labdnsv1alpha1.NodeLabelSource{NodeLabel: "example.test/v6"}}, RecordDefaults: labdnsv1alpha1.RecordDefaults{TTL: 300, DeletionDelay: &metav1.Duration{Duration: time.Minute}}}}
-	pubs, err := (Resolver{Reader: kubeClient}).Publications(context.Background(), []HostProjection{{Hostname: "app.example.com", Backends: []Backend{{Namespace: "app", Name: "api"}}}}, []*labdnsv1alpha1.DNSProvider{provider}, ParsedAnnotations{}, nil)
+	pubs, err := (Resolver{Reader: kubeClient}).Publications(context.Background(), []HostProjection{{Hostname: "app.example.com", Backends: []Backend{{Namespace: "app", Name: "api"}}}}, []*labdnsv1alpha1.DNSProvider{provider}, PublicationOptions{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +249,7 @@ func TestResolverInvalidNodeLabelFailsWholePublication(t *testing.T) {
 	one := "one"
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "app"}}, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "one", Labels: map[string]string{"example.test/v4": "not-an-ip"}}}, &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "app", Labels: map[string]string{discoveryv1.LabelServiceName: "api"}}, AddressType: discoveryv1.AddressTypeIPv4, Endpoints: []discoveryv1.Endpoint{{NodeName: &one}}}).Build()
 	provider := &labdnsv1alpha1.DNSProvider{ObjectMeta: metav1.ObjectMeta{Name: "www"}, Spec: labdnsv1alpha1.DNSProviderSpec{Zones: []labdnsv1alpha1.DNSZone{{Name: "example.com"}}, IPSources: labdnsv1alpha1.IPSources{IPv4: &labdnsv1alpha1.NodeLabelSource{NodeLabel: "example.test/v4"}}}}
-	if _, err := (Resolver{Reader: kubeClient}).Publications(context.Background(), []HostProjection{{Hostname: "app.example.com", Backends: []Backend{{Namespace: "app", Name: "api"}}}}, []*labdnsv1alpha1.DNSProvider{provider}, ParsedAnnotations{}, nil); err == nil {
+	if _, err := (Resolver{Reader: kubeClient}).Publications(context.Background(), []HostProjection{{Hostname: "app.example.com", Backends: []Backend{{Namespace: "app", Name: "api"}}}}, []*labdnsv1alpha1.DNSProvider{provider}, PublicationOptions{}, nil); err == nil {
 		t.Fatal("expected invalid IP error")
 	}
 }
@@ -248,8 +259,8 @@ func TestProviderSpecificAllowlist(t *testing.T) {
 	resolved := map[string]string{cloudflareKey: "true", ExternalDNSPrefix + "other": "yes"}
 	www := &labdnsv1alpha1.DNSProvider{Spec: labdnsv1alpha1.DNSProviderSpec{ProviderSpecific: labdnsv1alpha1.ProviderSpecific{Defaults: []labdnsv1alpha1.ProviderProperty{{Name: cloudflareKey, Value: "false"}}, AnnotationKeys: []labdnsv1alpha1.AnnotationKey{labdnsv1alpha1.AnnotationKey(cloudflareKey)}}}}
 	vpn := &labdnsv1alpha1.DNSProvider{}
-	wwwProperties, wwwMetadata := ProviderProperties(www, resolved)
-	vpnProperties, vpnMetadata := ProviderProperties(vpn, resolved)
+	wwwProperties, wwwMetadata := providerProperties(www, resolved)
+	vpnProperties, vpnMetadata := providerProperties(vpn, resolved)
 	if len(wwwProperties) != 1 || wwwProperties[0] != (Property{Name: cloudflareKey, Value: "true"}) {
 		t.Fatalf("www properties %#v", wwwProperties)
 	}
@@ -272,7 +283,7 @@ func TestResolverWarnsForHostnameOutsideProviderZones(t *testing.T) {
 	warnings := 0
 	publications, err := (Resolver{}).Publications(
 		context.Background(), []HostProjection{{Hostname: "app.example.com"}},
-		[]*labdnsv1alpha1.DNSProvider{provider}, ParsedAnnotations{}, func(reason, _ string) {
+		[]*labdnsv1alpha1.DNSProvider{provider}, PublicationOptions{}, func(reason, _ string) {
 			if reason == "HostnameOutsideZones" {
 				warnings++
 			}
@@ -303,7 +314,7 @@ func TestResolverPropagatesContextCancellation(t *testing.T) {
 	provider := &labdnsv1alpha1.DNSProvider{ObjectMeta: metav1.ObjectMeta{Name: "www"}, Spec: labdnsv1alpha1.DNSProviderSpec{Zones: []labdnsv1alpha1.DNSZone{{Name: "example.com"}}, IPSources: labdnsv1alpha1.IPSources{IPv4: &labdnsv1alpha1.NodeLabelSource{NodeLabel: "example.test/ip"}}}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := (Resolver{Reader: cancellationReader{Reader: base}}).Publications(ctx, []HostProjection{{Hostname: "app.example.com", Backends: []Backend{{Namespace: "app", Name: "api"}}}}, []*labdnsv1alpha1.DNSProvider{provider}, ParsedAnnotations{}, nil)
+	_, err := (Resolver{Reader: cancellationReader{Reader: base}}).Publications(ctx, []HostProjection{{Hostname: "app.example.com", Backends: []Backend{{Namespace: "app", Name: "api"}}}}, []*labdnsv1alpha1.DNSProvider{provider}, PublicationOptions{}, nil)
 	if err == nil {
 		t.Fatal("expected cancellation error")
 	}

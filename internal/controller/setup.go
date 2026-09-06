@@ -18,14 +18,13 @@ package controller
 
 import (
 	"context"
+	stdslices "slices"
 	"strings"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,16 +40,16 @@ import (
 )
 
 const (
-	BackendServiceIndex      = "labdns.backendService"
-	IngressClassIndex        = "labdns.ingressClass"
-	GatewayParentIndex       = "labdns.gatewayParent"
-	GatewayClassIndex        = "labdns.gatewayClass"
-	ProviderTokenIndex       = "labdns.providerToken"
-	BackendNamespaceIndex    = "labdns.backendNamespace"
-	EndpointNodeIndex        = "labdns.endpointNode"
-	EndpointServiceIndex     = "labdns.endpointService"
-	DNSEndpointSourceIndex   = "labdns.dnsEndpointSource"
-	DNSEndpointProviderIndex = "labdns.dnsEndpointProvider"
+	backendServiceIndex      = "labdns.backendService"
+	ingressClassIndex        = "labdns.ingressClass"
+	gatewayParentIndex       = "labdns.gatewayParent"
+	gatewayClassIndex        = "labdns.gatewayClass"
+	providerTokenIndex       = "labdns.providerToken"
+	backendNamespaceIndex    = "labdns.backendNamespace"
+	endpointNodeIndex        = "labdns.endpointNode"
+	endpointServiceIndex     = "labdns.endpointService"
+	dnsEndpointSourceIndex   = "labdns.dnsEndpointSource"
+	dnsEndpointProviderIndex = "labdns.dnsEndpointProvider"
 )
 
 // +kubebuilder:rbac:groups=labdns.shednet.dev,resources=dnsproviders,verbs=get;list;watch
@@ -64,18 +63,14 @@ const (
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
-func Setup(ctx context.Context, mgr manager.Manager, output source.Output, gatewayEnabled bool, observed ...*Metrics) error {
-	var metrics *Metrics
-	if len(observed) != 0 {
-		metrics = observed[0]
-	}
+func Setup(ctx context.Context, mgr manager.Manager, output source.Output, gatewayEnabled bool, metrics *Metrics) error {
 	if err := addIndexes(ctx, mgr.GetFieldIndexer(), gatewayEnabled); err != nil {
 		return err
 	}
-	mapper := newMapper(mgr.GetClient(), gatewayEnabled)
+	mapper := newMapper(mgr.GetClient())
 	// EnqueueRequestsFromMapFunc maps both ObjectOld and ObjectNew on updates.
 	// This is required for label, backend, Node-placement, and class reassignment changes.
-	ingress := &IngressReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Recorder: mgr.GetEventRecorder("labdns-ingress"), Output: output, Resolver: source.Resolver{Reader: mgr.GetClient()}, Metrics: metrics}
+	ingress := &ingressReconciler{Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("labdns-ingress"), Output: output, Resolver: source.Resolver{Reader: mgr.GetClient()}, Metrics: metrics}
 	b := builder.ControllerManagedBy(mgr).Named("ingress-source").For(&networkingv1.Ingress{}).
 		Watches(&networkingv1.IngressClass{}, handler.EnqueueRequestsFromMapFunc(mapper.ingressClass)).
 		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(mapper.ingressService)).
@@ -89,7 +84,7 @@ func Setup(ctx context.Context, mgr manager.Manager, output source.Output, gatew
 	if !gatewayEnabled {
 		return nil
 	}
-	route := &HTTPRouteReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Recorder: mgr.GetEventRecorder("labdns-httproute"), Output: output, Resolver: source.Resolver{Reader: mgr.GetClient()}, Metrics: metrics}
+	route := &httpRouteReconciler{Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("labdns-httproute"), Output: output, Resolver: source.Resolver{Reader: mgr.GetClient()}, Metrics: metrics}
 	return builder.ControllerManagedBy(mgr).Named("httproute-source").For(&gatewayv1.HTTPRoute{}).
 		Watches(&gatewayv1.Gateway{}, handler.EnqueueRequestsFromMapFunc(mapper.routeGateway)).
 		Watches(&gatewayv1.GatewayClass{}, handler.EnqueueRequestsFromMapFunc(mapper.routeGatewayClass)).
@@ -103,12 +98,8 @@ func Setup(ctx context.Context, mgr manager.Manager, output source.Output, gatew
 }
 
 // SetupLifecycle installs durable deadline recovery when the production output supports it.
-func SetupLifecycle(mgr manager.Manager, output lifecycleOutput, gatewayEnabled bool, observed ...*Metrics) error {
-	var metrics *Metrics
-	if len(observed) != 0 {
-		metrics = observed[0]
-	}
-	reconciler := &LifecycleReconciler{Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("labdns-lifecycle"), Output: output, GatewayEnabled: gatewayEnabled, Metrics: metrics}
+func SetupLifecycle(mgr manager.Manager, output lifecycleOutput, gatewayEnabled bool, metrics *Metrics) error {
+	reconciler := &lifecycleReconciler{Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("labdns-lifecycle"), Output: output, GatewayEnabled: gatewayEnabled, Metrics: metrics}
 	return builder.ControllerManagedBy(mgr).Named("dnsendpoint-lifecycle").For(&externaldnsv1alpha1.DNSEndpoint{}).Complete(reconciler)
 }
 
@@ -118,14 +109,14 @@ func addIndexes(ctx context.Context, indexer client.FieldIndexer, gatewayEnabled
 		field  string
 		fn     client.IndexerFunc
 	}{
-		{&networkingv1.Ingress{}, BackendServiceIndex, ingressBackendKeys},
-		{&networkingv1.Ingress{}, IngressClassIndex, ingressClassKeys},
-		{&networkingv1.Ingress{}, ProviderTokenIndex, providerTokens},
-		{&networkingv1.IngressClass{}, ProviderTokenIndex, providerTokens},
-		{&discoveryv1.EndpointSlice{}, EndpointNodeIndex, endpointNodes},
-		{&discoveryv1.EndpointSlice{}, EndpointServiceIndex, endpointService},
-		{&externaldnsv1alpha1.DNSEndpoint{}, DNSEndpointSourceIndex, dnsEndpointSource},
-		{&externaldnsv1alpha1.DNSEndpoint{}, DNSEndpointProviderIndex, dnsEndpointProvider},
+		{&networkingv1.Ingress{}, backendServiceIndex, ingressBackendKeys},
+		{&networkingv1.Ingress{}, ingressClassIndex, ingressClassKeys},
+		{&networkingv1.Ingress{}, providerTokenIndex, providerTokens},
+		{&networkingv1.IngressClass{}, providerTokenIndex, providerTokens},
+		{&discoveryv1.EndpointSlice{}, endpointNodeIndex, endpointNodes},
+		{&discoveryv1.EndpointSlice{}, endpointServiceIndex, endpointService},
+		{&externaldnsv1alpha1.DNSEndpoint{}, dnsEndpointSourceIndex, dnsEndpointSource},
+		{&externaldnsv1alpha1.DNSEndpoint{}, dnsEndpointProviderIndex, dnsEndpointProvider},
 	}
 	if gatewayEnabled {
 		indexes = append(indexes,
@@ -133,37 +124,37 @@ func addIndexes(ctx context.Context, indexer client.FieldIndexer, gatewayEnabled
 				object client.Object
 				field  string
 				fn     client.IndexerFunc
-			}{&gatewayv1.HTTPRoute{}, BackendServiceIndex, routeBackendKeys},
+			}{&gatewayv1.HTTPRoute{}, backendServiceIndex, routeBackendKeys},
 			struct {
 				object client.Object
 				field  string
 				fn     client.IndexerFunc
-			}{&gatewayv1.HTTPRoute{}, GatewayParentIndex, routeParents},
+			}{&gatewayv1.HTTPRoute{}, gatewayParentIndex, routeParents},
 			struct {
 				object client.Object
 				field  string
 				fn     client.IndexerFunc
-			}{&gatewayv1.HTTPRoute{}, ProviderTokenIndex, providerTokens},
+			}{&gatewayv1.HTTPRoute{}, providerTokenIndex, providerTokens},
 			struct {
 				object client.Object
 				field  string
 				fn     client.IndexerFunc
-			}{&gatewayv1.HTTPRoute{}, BackendNamespaceIndex, routeBackendNamespaces},
+			}{&gatewayv1.HTTPRoute{}, backendNamespaceIndex, routeBackendNamespaces},
 			struct {
 				object client.Object
 				field  string
 				fn     client.IndexerFunc
-			}{&gatewayv1.Gateway{}, GatewayClassIndex, gatewayClass},
+			}{&gatewayv1.Gateway{}, gatewayClassIndex, gatewayClass},
 			struct {
 				object client.Object
 				field  string
 				fn     client.IndexerFunc
-			}{&gatewayv1.Gateway{}, ProviderTokenIndex, providerTokens},
+			}{&gatewayv1.Gateway{}, providerTokenIndex, providerTokens},
 			struct {
 				object client.Object
 				field  string
 				fn     client.IndexerFunc
-			}{&gatewayv1.GatewayClass{}, ProviderTokenIndex, providerTokens},
+			}{&gatewayv1.GatewayClass{}, providerTokenIndex, providerTokens},
 		)
 	}
 	for _, index := range indexes {
@@ -295,12 +286,11 @@ func keys(values map[string]struct{}) []string {
 }
 
 type mapper struct {
-	client  client.Client
-	gateway bool
+	client client.Client
 }
 
-func newMapper(kubeClient client.Client, gateway bool) *mapper {
-	return &mapper{client: kubeClient, gateway: gateway}
+func newMapper(kubeClient client.Client) *mapper {
+	return &mapper{client: kubeClient}
 }
 func requests(objects client.ObjectList) []reconcile.Request {
 	result := []reconcile.Request{}
@@ -318,40 +308,57 @@ func requests(objects client.ObjectList) []reconcile.Request {
 }
 func (m *mapper) ingresses(ctx context.Context, field, value string) []reconcile.Request {
 	var list networkingv1.IngressList
-	if !m.list(ctx, "Ingress dependencies", func(ctx context.Context) error {
+	if err := m.list(ctx, "Ingress dependencies", func(ctx context.Context) error {
 		return m.client.List(ctx, &list, client.MatchingFields{field: value})
-	}) {
+	}); err == nil {
+		return requests(&list)
+	}
+	// A cache may not have the requested field index during startup or after a
+	// cache rebuild. Enqueueing every source is conservative and lets each
+	// reconciler re-check the actual dependency.
+	list = networkingv1.IngressList{}
+	if err := m.list(ctx, "all Ingress sources after indexed lookup failure", func(ctx context.Context) error {
+		return m.client.List(ctx, &list)
+	}); err != nil {
+		m.terminalListFailure(ctx, "Ingress dependencies", err)
 		return nil
 	}
 	return requests(&list)
 }
 func (m *mapper) routes(ctx context.Context, field, value string) []reconcile.Request {
 	var list gatewayv1.HTTPRouteList
-	if !m.list(ctx, "HTTPRoute dependencies", func(ctx context.Context) error {
+	if err := m.list(ctx, "HTTPRoute dependencies", func(ctx context.Context) error {
 		return m.client.List(ctx, &list, client.MatchingFields{field: value})
-	}) {
+	}); err == nil {
+		return requests(&list)
+	}
+	list = gatewayv1.HTTPRouteList{}
+	if err := m.list(ctx, "all HTTPRoute sources after indexed lookup failure", func(ctx context.Context) error {
+		return m.client.List(ctx, &list)
+	}); err != nil {
+		m.terminalListFailure(ctx, "HTTPRoute dependencies", err)
 		return nil
 	}
 	return requests(&list)
 }
 func (m *mapper) ingressClass(ctx context.Context, object client.Object) []reconcile.Request {
-	return m.ingresses(ctx, IngressClassIndex, object.GetName())
+	return m.ingresses(ctx, ingressClassIndex, object.GetName())
 }
 func (m *mapper) ingressService(ctx context.Context, object client.Object) []reconcile.Request {
-	return m.ingresses(ctx, BackendServiceIndex, object.GetNamespace()+"/"+object.GetName())
+	return m.ingresses(ctx, backendServiceIndex, object.GetNamespace()+"/"+object.GetName())
 }
 func (m *mapper) routeService(ctx context.Context, object client.Object) []reconcile.Request {
-	return m.routes(ctx, BackendServiceIndex, object.GetNamespace()+"/"+object.GetName())
+	return m.routes(ctx, backendServiceIndex, object.GetNamespace()+"/"+object.GetName())
 }
 func (m *mapper) ingressSlice(ctx context.Context, object client.Object) []reconcile.Request {
 	for _, key := range endpointService(object) {
-		return m.ingresses(ctx, BackendServiceIndex, key)
+		return m.ingresses(ctx, backendServiceIndex, key)
 	}
 	return nil
 }
 func (m *mapper) routeSlice(ctx context.Context, object client.Object) []reconcile.Request {
 	for _, key := range endpointService(object) {
-		return m.routes(ctx, BackendServiceIndex, key)
+		return m.routes(ctx, backendServiceIndex, key)
 	}
 	return nil
 }
@@ -363,115 +370,156 @@ func (m *mapper) routeNode(ctx context.Context, object client.Object) []reconcil
 }
 func (m *mapper) sourcesForNode(ctx context.Context, node string, routes bool) []reconcile.Request {
 	var slices discoveryv1.EndpointSliceList
-	if !m.list(ctx, "EndpointSlices by Node", func(ctx context.Context) error {
-		return m.client.List(ctx, &slices, client.MatchingFields{EndpointNodeIndex: node})
-	}) {
-		return nil
+	if err := m.list(ctx, "EndpointSlices by Node", func(ctx context.Context) error {
+		return m.client.List(ctx, &slices, client.MatchingFields{endpointNodeIndex: node})
+	}); err != nil {
+		slices = discoveryv1.EndpointSliceList{}
+		if err := m.list(ctx, "all EndpointSlices after node index lookup failure", func(ctx context.Context) error {
+			return m.client.List(ctx, &slices)
+		}); err != nil {
+			m.terminalListFailure(ctx, "EndpointSlices by Node", err)
+			return nil
+		}
 	}
 	result := []reconcile.Request{}
 	for i := range slices.Items {
+		if !containsString(endpointNodes(&slices.Items[i]), node) {
+			continue
+		}
 		for _, key := range endpointService(&slices.Items[i]) {
 			if routes {
-				result = append(result, m.routes(ctx, BackendServiceIndex, key)...)
+				result = append(result, m.routes(ctx, backendServiceIndex, key)...)
 			} else {
-				result = append(result, m.ingresses(ctx, BackendServiceIndex, key)...)
+				result = append(result, m.ingresses(ctx, backendServiceIndex, key)...)
 			}
 		}
 	}
 	return dedupe(result)
 }
 func (m *mapper) routeGateway(ctx context.Context, object client.Object) []reconcile.Request {
-	return m.routes(ctx, GatewayParentIndex, object.GetNamespace()+"/"+object.GetName())
+	return m.routes(ctx, gatewayParentIndex, object.GetNamespace()+"/"+object.GetName())
 }
 func (m *mapper) routeGatewayClass(ctx context.Context, object client.Object) []reconcile.Request {
 	var gateways gatewayv1.GatewayList
-	if !m.list(ctx, "Gateways by GatewayClass", func(ctx context.Context) error {
-		return m.client.List(ctx, &gateways, client.MatchingFields{GatewayClassIndex: object.GetName()})
-	}) {
-		return nil
+	if err := m.list(ctx, "Gateways by GatewayClass", func(ctx context.Context) error {
+		return m.client.List(ctx, &gateways, client.MatchingFields{gatewayClassIndex: object.GetName()})
+	}); err != nil {
+		gateways = gatewayv1.GatewayList{}
+		if err := m.list(ctx, "all Gateways after class index lookup failure", func(ctx context.Context) error {
+			return m.client.List(ctx, &gateways)
+		}); err != nil {
+			m.terminalListFailure(ctx, "Gateways by GatewayClass", err)
+			return nil
+		}
 	}
 	result := []reconcile.Request{}
 	for i := range gateways.Items {
+		if string(gateways.Items[i].Spec.GatewayClassName) != object.GetName() {
+			continue
+		}
 		result = append(result, m.routeGateway(ctx, &gateways.Items[i])...)
 	}
 	return dedupe(result)
 }
 func (m *mapper) routeGrant(ctx context.Context, object client.Object) []reconcile.Request {
-	return m.routes(ctx, BackendNamespaceIndex, object.GetNamespace())
+	return m.routes(ctx, backendNamespaceIndex, object.GetNamespace())
 }
 func (m *mapper) ingressProvider(ctx context.Context, object client.Object) []reconcile.Request {
 	name := object.GetName()
-	result := m.ingresses(ctx, ProviderTokenIndex, name)
+	result := m.ingresses(ctx, providerTokenIndex, name)
 	var classes networkingv1.IngressClassList
-	if m.list(ctx, "IngressClasses by provider", func(ctx context.Context) error {
-		return m.client.List(ctx, &classes, client.MatchingFields{ProviderTokenIndex: name})
-	}) {
-		for i := range classes.Items {
-			result = append(result, m.ingressClass(ctx, &classes.Items[i])...)
+	if err := m.list(ctx, "IngressClasses by provider", func(ctx context.Context) error {
+		return m.client.List(ctx, &classes, client.MatchingFields{providerTokenIndex: name})
+	}); err != nil {
+		classes = networkingv1.IngressClassList{}
+		if err := m.list(ctx, "all IngressClasses after provider index lookup failure", func(ctx context.Context) error {
+			return m.client.List(ctx, &classes)
+		}); err != nil {
+			m.terminalListFailure(ctx, "IngressClasses by provider", err)
+			return dedupe(result)
 		}
+	}
+	for i := range classes.Items {
+		if !containsString(providerTokens(&classes.Items[i]), name) {
+			continue
+		}
+		result = append(result, m.ingressClass(ctx, &classes.Items[i])...)
 	}
 	return dedupe(result)
 }
 func (m *mapper) routeProvider(ctx context.Context, object client.Object) []reconcile.Request {
 	name := object.GetName()
-	result := m.routes(ctx, ProviderTokenIndex, name)
+	result := m.routes(ctx, providerTokenIndex, name)
 	var gateways gatewayv1.GatewayList
-	if m.list(ctx, "Gateways by provider", func(ctx context.Context) error {
-		return m.client.List(ctx, &gateways, client.MatchingFields{ProviderTokenIndex: name})
-	}) {
-		for i := range gateways.Items {
-			result = append(result, m.routeGateway(ctx, &gateways.Items[i])...)
+	if err := m.list(ctx, "Gateways by provider", func(ctx context.Context) error {
+		return m.client.List(ctx, &gateways, client.MatchingFields{providerTokenIndex: name})
+	}); err != nil {
+		gateways = gatewayv1.GatewayList{}
+		if err := m.list(ctx, "all Gateways after provider index lookup failure", func(ctx context.Context) error {
+			return m.client.List(ctx, &gateways)
+		}); err != nil {
+			m.terminalListFailure(ctx, "Gateways by provider", err)
+			return dedupe(result)
 		}
 	}
-	var classes gatewayv1.GatewayClassList
-	if m.list(ctx, "GatewayClasses by provider", func(ctx context.Context) error {
-		return m.client.List(ctx, &classes, client.MatchingFields{ProviderTokenIndex: name})
-	}) {
-		for i := range classes.Items {
-			result = append(result, m.routeGatewayClass(ctx, &classes.Items[i])...)
+	for i := range gateways.Items {
+		if !containsString(providerTokens(&gateways.Items[i]), name) {
+			continue
 		}
+		result = append(result, m.routeGateway(ctx, &gateways.Items[i])...)
+	}
+	var classes gatewayv1.GatewayClassList
+	if err := m.list(ctx, "GatewayClasses by provider", func(ctx context.Context) error {
+		return m.client.List(ctx, &classes, client.MatchingFields{providerTokenIndex: name})
+	}); err != nil {
+		classes = gatewayv1.GatewayClassList{}
+		if err := m.list(ctx, "all GatewayClasses after provider index lookup failure", func(ctx context.Context) error {
+			return m.client.List(ctx, &classes)
+		}); err != nil {
+			m.terminalListFailure(ctx, "GatewayClasses by provider", err)
+			return dedupe(result)
+		}
+	}
+	for i := range classes.Items {
+		if !containsString(providerTokens(&classes.Items[i]), name) {
+			continue
+		}
+		result = append(result, m.routeGatewayClass(ctx, &classes.Items[i])...)
 	}
 	return dedupe(result)
 }
 
-func (m *mapper) list(ctx context.Context, description string, operation func(context.Context) error) bool {
-	backoff := wait.Backoff{
-		Duration: 5 * time.Millisecond,
-		Factor:   2,
-		Jitter:   0.1,
-		Steps:    6,
-		Cap:      100 * time.Millisecond,
+func (m *mapper) list(ctx context.Context, description string, operation func(context.Context) error) error {
+	if err := ctx.Err(); err != nil {
+		ctrl.LoggerFrom(ctx).V(1).Info("dependency mapping read canceled", "read", description, "error", err)
+		return err
 	}
-	for {
-		if err := ctx.Err(); err != nil {
-			ctrl.LoggerFrom(ctx).V(1).Info("dependency mapping read canceled", "read", description, "error", err)
-			return false
-		}
-
-		if err := operation(ctx); err == nil {
-			return true
-		} else {
-			ctrl.LoggerFrom(ctx).V(1).Info("dependency mapping read failed; retrying", "read", description, "error", err)
-		}
-
-		timer := time.NewTimer(backoff.Step())
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			ctrl.LoggerFrom(ctx).V(1).Info("dependency mapping read canceled", "read", description, "error", ctx.Err())
-			return false
-		case <-timer.C:
-		}
+	if err := operation(ctx); err != nil {
+		ctrl.LoggerFrom(ctx).V(1).Info("dependency mapping read failed", "read", description, "error", err)
+		return err
 	}
+	return nil
+}
+
+func (m *mapper) terminalListFailure(ctx context.Context, description string, err error) {
+	if ctx.Err() != nil {
+		ctrl.LoggerFrom(ctx).V(1).Info("dependency mapping read canceled", "read", description, "error", ctx.Err())
+		return
+	}
+	ctrl.LoggerFrom(ctx).Error(err, "dependency mapping read exhausted fallback", "read", description)
+}
+
+func containsString(values []string, wanted string) bool {
+	return stdslices.Contains(values, wanted)
 }
 func (m *mapper) ingressEndpoint(_ context.Context, object client.Object) []reconcile.Request {
-	if object.GetAnnotations()[source.AnnotationPrefix+"source-kind"] != sourceKindIngress {
+	if object.GetAnnotations()[source.AnnotationPrefix+"source-kind"] != string(sourceKindIngress) {
 		return nil
 	}
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: object.GetAnnotations()[source.AnnotationPrefix+"source-namespace"], Name: object.GetAnnotations()[source.AnnotationPrefix+"source-name"]}}}
 }
 func (m *mapper) routeEndpoint(_ context.Context, object client.Object) []reconcile.Request {
-	if object.GetAnnotations()[source.AnnotationPrefix+"source-kind"] != sourceKindHTTPRoute {
+	if object.GetAnnotations()[source.AnnotationPrefix+"source-kind"] != string(sourceKindHTTPRoute) {
 		return nil
 	}
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: object.GetAnnotations()[source.AnnotationPrefix+"source-namespace"], Name: object.GetAnnotations()[source.AnnotationPrefix+"source-name"]}}}

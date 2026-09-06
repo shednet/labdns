@@ -318,6 +318,8 @@ func TestMalformedLifecycleFailsClosed(t *testing.T) {
 			m, counted, _ := newWriter(t, object)
 			if err := m.Apply(context.Background(), identity, nil); err == nil {
 				t.Fatal("accepted invalid lifecycle")
+			} else if !IsInvalidState(err) {
+				t.Fatalf("error = %v, want invalid state", err)
 			}
 			got := getEndpoint(t, counted, identity, "www")
 			if len(got.Spec.Endpoints[0].Targets) != 1 || counted.updates != 0 || counted.deletes != 0 {
@@ -339,6 +341,8 @@ func TestMissingRequiredStoredMetadataFailsClosed(t *testing.T) {
 			m, counted, _ := newWriter(t, object)
 			if err := m.Apply(context.Background(), identity, []source.Publication{publication("www", time.Minute, record(targetTwo))}); err == nil {
 				t.Fatalf("accepted missing %s", name)
+			} else if !IsInvalidState(err) {
+				t.Fatalf("error = %v, want invalid state", err)
 			}
 			got := getEndpoint(t, counted, identity, "www")
 			if len(got.Spec.Endpoints) != 1 || len(got.Spec.Endpoints[0].Targets) != 1 || got.Spec.Endpoints[0].Targets[0] != targetOne || counted.updates != 0 || counted.deletes != 0 {
@@ -360,7 +364,7 @@ func TestPreservesUnrelatedMetadataAndStatus(t *testing.T) {
 	object.Annotations["example.test/foreign"] = kept
 	object.Finalizers = []string{"example.test/foreign"}
 	object.OwnerReferences = []metav1.OwnerReference{
-		{APIVersion: identity.APIVersion, Kind: identity.Kind, Name: identity.Name, UID: identity.UID},
+		{APIVersion: identity.APIVersion, Kind: string(identity.Kind), Name: identity.Name, UID: identity.UID},
 		{APIVersion: "example.test/v1", Kind: "Foreign", Name: "kept", UID: types.UID("foreign")},
 	}
 	object.Status.ObservedGeneration = 7
@@ -385,7 +389,7 @@ func TestSourceOwnerReferenceOnlyDeltaIsWritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	object := getEndpoint(t, counted, identity, "www")
-	object.OwnerReferences = []metav1.OwnerReference{{APIVersion: identity.APIVersion, Kind: identity.Kind, Name: identity.Name, UID: identity.UID}}
+	object.OwnerReferences = []metav1.OwnerReference{{APIVersion: identity.APIVersion, Kind: string(identity.Kind), Name: identity.Name, UID: identity.UID}}
 	if err := counted.Client.Update(context.Background(), object); err != nil {
 		t.Fatal(err)
 	}

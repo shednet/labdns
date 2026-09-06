@@ -84,7 +84,7 @@ func TestSourceReconcilerUpdatesMetricsAcrossWatchStates(t *testing.T) {
 		source.EnabledAnnotation: "true", source.ProvidersAnnotation: "www",
 	}}}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(provider, ingress).Build()
-	reconciler := &IngressReconciler{Client: kubeClient, Output: &recordingOutput{}, Resolver: source.Resolver{Reader: kubeClient}, Metrics: metrics}
+	reconciler := &ingressReconciler{Client: kubeClient, Output: &recordingOutput{}, Resolver: source.Resolver{Reader: kubeClient}, Metrics: metrics}
 	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(ingress)}
 
 	if _, err := reconciler.Reconcile(ctx, request); err != nil {
@@ -165,7 +165,7 @@ func TestLifecycleReconcilerUpdatesEndpointMetrics(t *testing.T) {
 		},
 	}, Spec: externaldnsv1alpha1.DNSEndpointSpec{Endpoints: []*endpoint.Endpoint{{DNSName: "app.example.com", RecordType: "A", Targets: []string{"192.0.2.1"}}}}}
 	kubeClient := fake.NewClientBuilder().WithScheme(lifecycleScheme(t)).WithObjects(sourceObject, object).Build()
-	reconciler := &LifecycleReconciler{Client: kubeClient, Output: metricsLifecycleOutput{}, Metrics: metrics}
+	reconciler := &lifecycleReconciler{Client: kubeClient, Output: metricsLifecycleOutput{}, Metrics: metrics}
 	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(object)}
 
 	if _, err := reconciler.Reconcile(ctx, request); err != nil {
