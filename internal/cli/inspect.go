@@ -19,8 +19,10 @@ package cli
 import (
 	"context"
 	"fmt"
+	"path"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -39,34 +41,49 @@ import (
 	"github.com/shednet/labdns/internal/dnsendpoint"
 )
 
-type Filters struct {
+type filters struct {
 	Namespace  string
 	Provider   string
-	SourceKind string
-	RecordType string
+	SourceKind sourceKindFilter
+	RecordType recordTypeFilter
 }
 
-type Inspector struct {
-	Client    client.Client
-	Discovery discovery.DiscoveryInterface
+type sourceKindFilter string
+
+const (
+	sourceKindIngressFilter   sourceKindFilter = "Ingress"
+	sourceKindHTTPRouteFilter sourceKindFilter = "HTTPRoute"
+)
+
+type recordTypeFilter string
+
+const (
+	recordTypeAFilter    recordTypeFilter = "A"
+	recordTypeAAAAFilter recordTypeFilter = "AAAA"
+)
+
+type inspector struct {
+	Client           client.Client
+	Discovery        discovery.DiscoveryInterface
+	dnsClientFactory dnsClientFactory
 }
 
-func (i Inspector) Records(ctx context.Context, filters Filters) (RecordList, error) {
+func (i inspector) records(ctx context.Context, filters filters) (recordList, error) {
 	var objects externaldnsv1alpha1.DNSEndpointList
 	opts := []client.ListOption{client.MatchingLabels{dnsendpoint.ManagedByLabel: dnsendpoint.ManagedByValue}}
 	if filters.Namespace != "" {
 		opts = append(opts, client.InNamespace(filters.Namespace))
 	}
 	if err := i.Client.List(ctx, &objects, opts...); err != nil {
-		return RecordList{}, fmt.Errorf("list managed DNSEndpoints: %w", err)
+		return recordList{}, fmt.Errorf("list managed DNSEndpoints: %w", err)
 	}
-	result := RecordList{Items: []Record{}}
+	result := recordList{Items: []record{}}
 	for index := range objects.Items {
 		object := &objects.Items[index]
 		if filters.Provider != "" && object.Labels[dnsendpoint.ProviderLabel] != filters.Provider {
 			continue
 		}
-		if filters.SourceKind != "" && !strings.EqualFold(object.Annotations[dnsendpoint.SourceKindAnnotation], filters.SourceKind) {
+		if filters.SourceKind != "" && !strings.EqualFold(object.Annotations[dnsendpoint.SourceKindAnnotation], string(filters.SourceKind)) {
 			continue
 		}
 		result.Items = append(result.Items, recordsFor(object, filters.RecordType)...)
@@ -79,11 +96,11 @@ func (i Inspector) Records(ctx context.Context, filters Filters) (RecordList, er
 	return result, nil
 }
 
-func recordsFor(object *externaldnsv1alpha1.DNSEndpoint, recordType string) []Record {
+func recordsFor(object *externaldnsv1alpha1.DNSEndpoint, recordType recordTypeFilter) []record {
 	pending, lifecycleErr := dnsendpoint.InspectLifecycle(object.Annotations[dnsendpoint.LifecycleAnnotation])
-	result := make([]Record, 0, len(object.Spec.Endpoints))
+	result := make([]record, 0, len(object.Spec.Endpoints))
 	for _, item := range object.Spec.Endpoints {
-		if item == nil || recordType != "" && !strings.EqualFold(item.RecordType, recordType) {
+		if item == nil || recordType != "" && !strings.EqualFold(item.RecordType, string(recordType)) {
 			continue
 		}
 		properties := map[string][]string{}
@@ -96,31 +113,35 @@ func recordsFor(object *externaldnsv1alpha1.DNSEndpoint, recordType string) []Re
 		if len(properties) == 0 {
 			properties = nil
 		}
-		record := Record{
+		record := record{
 			DNSName: item.DNSName, RecordType: item.RecordType, Targets: slices.Clone(item.Targets), TTL: int64(item.RecordTTL),
-			ActiveTargets: []string{},
+			ActiveTargets: nil,
 			Provider:      object.Labels[dnsendpoint.ProviderLabel],
-			Source:        SourceRef{Kind: object.Annotations[dnsendpoint.SourceKindAnnotation], Namespace: object.Annotations[dnsendpoint.SourceNamespaceAnnotation], Name: object.Annotations[dnsendpoint.SourceNameAnnotation], UID: object.Annotations[dnsendpoint.SourceUIDAnnotation]},
-			DNSEndpoint:   ObjectRef{Namespace: object.Namespace, Name: object.Name}, Generation: object.Generation,
+			Source:        sourceRef{Kind: object.Annotations[dnsendpoint.SourceKindAnnotation], Namespace: object.Annotations[dnsendpoint.SourceNamespaceAnnotation], Name: object.Annotations[dnsendpoint.SourceNameAnnotation], UID: object.Annotations[dnsendpoint.SourceUIDAnnotation]},
+			DNSEndpoint:   objectRef{Namespace: object.Namespace, Name: object.Name}, Generation: object.Generation,
 			Observed: object.Status.ObservedGeneration, ExternalDNSState: observationState(object.Generation, object.Status.ObservedGeneration), Properties: properties,
 		}
 		sort.Strings(record.Targets)
 		if lifecycleErr != nil {
 			record.LifecycleError = lifecycleErr.Error()
+			record.ExternalDNSState = stateInvalid
 		} else {
 			for _, target := range pending {
 				if target.DNSName == item.DNSName && target.RecordType == item.RecordType {
-					record.Retiring = append(record.Retiring, RetiringTarget{Target: target.Target, Deadline: target.Deadline})
+					record.Retiring = append(record.Retiring, retiringTarget{Target: target.Target, Deadline: target.Deadline})
 				}
 			}
 		}
-		retiring := map[string]struct{}{}
-		for _, target := range record.Retiring {
-			retiring[target.Target] = struct{}{}
-		}
-		for _, target := range record.Targets {
-			if _, found := retiring[target]; !found {
-				record.ActiveTargets = append(record.ActiveTargets, target)
+		if lifecycleErr == nil {
+			record.ActiveTargets = []string{}
+			retiring := map[string]struct{}{}
+			for _, target := range record.Retiring {
+				retiring[target.Target] = struct{}{}
+			}
+			for _, target := range record.Targets {
+				if _, found := retiring[target]; !found {
+					record.ActiveTargets = append(record.ActiveTargets, target)
+				}
 			}
 		}
 		result = append(result, record)
@@ -135,34 +156,44 @@ func observationState(generation, observed int64) string {
 	case observed == 0:
 		return "unobserved"
 	case observed < generation:
-		return "stale"
+		return stateStale
 	default:
 		return stateInvalid
 	}
 }
 
-func (i Inspector) Details(ctx context.Context, name string, filters Filters, dnsServer string) (RecordDetails, error) {
-	normalized := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
-	list, err := i.Records(ctx, filters)
-	if err != nil {
-		return RecordDetails{}, err
+func recordState(record record) string {
+	if record.LifecycleError != "" || record.ExternalDNSState == stateInvalid {
+		return stateInvalid
 	}
-	result := RecordDetails{Query: normalized, Items: []RecordDetail{}}
+	if record.ExternalDNSState == stateObserved {
+		return stateObserved
+	}
+	return stateStale
+}
+
+func (i inspector) details(ctx context.Context, name string, filters filters, dnsServer string) (recordDetails, error) {
+	normalized := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	list, err := i.records(ctx, filters)
+	if err != nil {
+		return recordDetails{}, err
+	}
+	result := recordDetails{Query: normalized, Items: []recordDetail{}}
 	for _, record := range list.Items {
 		if record.DNSName != normalized {
 			continue
 		}
-		detail := RecordDetail{Record: record}
+		detail := recordDetail{Record: record}
 		detail.Provider, err = i.providerDetail(ctx, record.Provider)
 		if err != nil {
-			return RecordDetails{}, err
+			return recordDetails{}, err
 		}
 		detail.Source, err = i.sourceDetail(ctx, record.Source)
 		if err != nil {
-			return RecordDetails{}, err
+			return recordDetails{}, err
 		}
 		if dnsServer != "" {
-			lookup := LookupDNS(ctx, dnsServer, record.DNSName, record.RecordType, record.Targets)
+			lookup := lookupDNS(ctx, dnsServer, record.DNSName, record.RecordType, record.Targets, i.dnsClientFactory)
 			detail.DNS = &lookup
 		}
 		result.Items = append(result.Items, detail)
@@ -173,14 +204,14 @@ func (i Inspector) Details(ctx context.Context, name string, filters Filters, dn
 	return result, nil
 }
 
-func (i Inspector) providerDetail(ctx context.Context, name string) (ProviderDetail, error) {
+func (i inspector) providerDetail(ctx context.Context, name string) (providerDetail, error) {
 	var provider labdnsv1alpha1.DNSProvider
 	if err := i.Client.Get(ctx, types.NamespacedName{Name: name}, &provider); apierrors.IsNotFound(err) {
-		return ProviderDetail{}, nil
+		return providerDetail{}, nil
 	} else if err != nil {
-		return ProviderDetail{}, fmt.Errorf("get DNSProvider %s: %w", name, err)
+		return providerDetail{}, fmt.Errorf("get DNSProvider %s: %w", name, err)
 	}
-	result := ProviderDetail{Found: true, DefaultTTL: provider.Spec.RecordDefaults.TTL}
+	result := providerDetail{Found: true, DefaultTTL: provider.Spec.RecordDefaults.TTL}
 	for _, zone := range provider.Spec.Zones {
 		result.Zones = append(result.Zones, zone.Name)
 	}
@@ -193,7 +224,7 @@ func (i Inspector) providerDetail(ctx context.Context, name string) (ProviderDet
 	return result, nil
 }
 
-func (i Inspector) sourceDetail(ctx context.Context, ref SourceRef) (SourceDetail, error) {
+func (i inspector) sourceDetail(ctx context.Context, ref sourceRef) (sourceDetail, error) {
 	var object client.Object
 	switch ref.Kind {
 	case "Ingress":
@@ -201,25 +232,25 @@ func (i Inspector) sourceDetail(ctx context.Context, ref SourceRef) (SourceDetai
 	case "HTTPRoute":
 		object = &gatewayv1.HTTPRoute{}
 	default:
-		return SourceDetail{}, nil
+		return sourceDetail{}, nil
 	}
 	if err := i.Client.Get(ctx, types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}, object); apierrors.IsNotFound(err) {
-		return SourceDetail{}, nil
+		return sourceDetail{}, nil
 	} else if err != nil {
-		return SourceDetail{}, fmt.Errorf("get source %s %s/%s: %w", ref.Kind, ref.Namespace, ref.Name, err)
+		return sourceDetail{}, fmt.Errorf("get source %s %s/%s: %w", ref.Kind, ref.Namespace, ref.Name, err)
 	}
-	return SourceDetail{Found: true, UIDMatches: ref.UID != "" && ref.UID == string(object.GetUID())}, nil
+	return sourceDetail{Found: true, UIDMatches: ref.UID != "" && ref.UID == string(object.GetUID())}, nil
 }
 
-func (i Inspector) Status(ctx context.Context, controllerNamespace, controllerName string) (Status, bool) {
-	result := Status{Overall: "healthy", Prerequisites: []Prerequisite{}, Controllers: []ControllerStatus{}, Warnings: []string{}}
+func (i inspector) status(ctx context.Context, controllerNamespace, controllerName string) (status, bool) {
+	result := status{Overall: "healthy", Prerequisites: []prerequisite{}, Controllers: []controllerStatus{}, Warnings: []string{}}
 	hardFailure := false
-	for _, prerequisite := range []struct{ name, version, resource string }{
+	for _, requirement := range []struct{ name, version, resource string }{
 		{"DNSProvider API", labdnsv1alpha1.GroupVersion.String(), "dnsproviders"},
 		{"DNSEndpoint API", externaldnsv1alpha1.GroupVersion.String(), "dnsendpoints"},
 	} {
-		available, err := resourceAvailable(i.Discovery, prerequisite.version, prerequisite.resource)
-		item := Prerequisite{Name: prerequisite.name, Available: available}
+		available, err := resourceAvailable(i.Discovery, requirement.version, requirement.resource)
+		item := prerequisite{Name: requirement.name, Available: available}
 		if err != nil {
 			item.Error = err.Error()
 			hardFailure = true
@@ -262,7 +293,7 @@ func (i Inspector) Status(ctx context.Context, controllerNamespace, controllerNa
 	} else {
 		result.Summary.Providers = len(providers.Items)
 	}
-	records, err := i.Records(ctx, Filters{})
+	records, err := i.records(ctx, filters{})
 	if err != nil {
 		result.Warnings = append(result.Warnings, err.Error())
 		hardFailure = true
@@ -273,16 +304,13 @@ func (i Inspector) Status(ctx context.Context, controllerNamespace, controllerNa
 			endpoints[record.DNSEndpoint.Namespace+"/"+record.DNSEndpoint.Name] = struct{}{}
 			sources[record.Source.Kind+"/"+record.Source.Namespace+"/"+record.Source.Name] = struct{}{}
 			result.Summary.PendingTargets += len(record.Retiring)
-			switch record.ExternalDNSState {
-			case stateObserved:
-				result.Summary.Observed++
+			switch recordState(record) {
 			case stateInvalid:
 				result.Summary.Invalid++
+			case stateObserved:
+				result.Summary.Observed++
 			default:
 				result.Summary.Stale++
-			}
-			if record.LifecycleError != "" {
-				result.Summary.Invalid++
 			}
 		}
 		result.Summary.DNSEndpoints, result.Summary.PublishingSources = len(endpoints), len(sources)
@@ -310,7 +338,7 @@ func resourceAvailable(discoveryClient discovery.DiscoveryInterface, version, re
 	return false, fmt.Errorf("resource %s not served in %s", resource, version)
 }
 
-func (i Inspector) controllers(ctx context.Context, namespace, name string) ([]ControllerStatus, error) {
+func (i inspector) controllers(ctx context.Context, namespace, name string) ([]controllerStatus, error) {
 	var deployments appsv1.DeploymentList
 	opts := []client.ListOption{}
 	if namespace != "" {
@@ -322,18 +350,22 @@ func (i Inspector) controllers(ctx context.Context, namespace, name string) ([]C
 	if err := i.Client.List(ctx, &deployments, opts...); err != nil {
 		return nil, fmt.Errorf("discover labdns controller Deployments: %w", err)
 	}
-	result := []ControllerStatus{}
+	result := []controllerStatus{}
 	for index := range deployments.Items {
 		deployment := &deployments.Items[index]
 		if name != "" && deployment.Name != name {
 			continue
 		}
-		item := ControllerStatus{Namespace: deployment.Namespace, Name: deployment.Name, Desired: 1, Available: deployment.Status.AvailableReplicas}
+		item := controllerStatus{Namespace: deployment.Namespace, Name: deployment.Name, Desired: 1, Available: deployment.Status.AvailableReplicas}
 		if deployment.Spec.Replicas != nil {
 			item.Desired = *deployment.Spec.Replicas
 		}
-		for _, container := range deployment.Spec.Template.Spec.Containers {
-			item.GatewayAPI = item.GatewayAPI || slices.Contains(container.Args, "--enable-gateway-api")
+		if manager := managerContainer(&deployment.Spec.Template); manager != nil {
+			gatewayEnabled, parseErr := gatewayAPIEnabled(manager.Args)
+			if parseErr != nil {
+				return nil, fmt.Errorf("inspect Deployment %s/%s manager arguments: %w", deployment.Namespace, deployment.Name, parseErr)
+			}
+			item.GatewayAPI = gatewayEnabled
 		}
 		selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
 		if err != nil {
@@ -354,6 +386,65 @@ func (i Inspector) controllers(ctx context.Context, namespace, name string) ([]C
 		return result[a].Namespace+"/"+result[a].Name < result[b].Namespace+"/"+result[b].Name
 	})
 	return result, nil
+}
+
+const (
+	defaultContainerAnnotation = "kubectl.kubernetes.io/default-container"
+	managerContainerName       = "manager"
+)
+
+func managerContainer(template *corev1.PodTemplateSpec) *corev1.Container {
+	if template == nil {
+		return nil
+	}
+	for index := range template.Spec.Containers {
+		if template.Spec.Containers[index].Name == managerContainerName {
+			return &template.Spec.Containers[index]
+		}
+	}
+	if name := template.Annotations[defaultContainerAnnotation]; name != "" {
+		for index := range template.Spec.Containers {
+			container := &template.Spec.Containers[index]
+			if container.Name == name && commandIsManager(container) {
+				return container
+			}
+		}
+	}
+	for index := range template.Spec.Containers {
+		container := &template.Spec.Containers[index]
+		if commandIsManager(container) {
+			return container
+		}
+	}
+	return nil
+}
+
+func commandIsManager(container *corev1.Container) bool {
+	if container == nil || len(container.Command) == 0 {
+		return false
+	}
+	return path.Base(container.Command[0]) == managerContainerName
+}
+
+func gatewayAPIEnabled(args []string) (bool, error) {
+	enabled := false
+	for _, arg := range args {
+		for _, prefix := range []string{"--enable-gateway-api", "-enable-gateway-api"} {
+			if arg == prefix {
+				enabled = true
+				break
+			}
+			if value, found := strings.CutPrefix(arg, prefix+"="); found {
+				parsed, err := strconv.ParseBool(value)
+				if err != nil {
+					return false, fmt.Errorf("invalid enable-gateway-api value %q: %w", value, err)
+				}
+				enabled = parsed
+				break
+			}
+		}
+	}
+	return enabled, nil
 }
 
 func podReady(pod *corev1.Pod) bool {

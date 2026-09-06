@@ -59,8 +59,8 @@ func TestRecordsFlattenFilterAndLifecycle(t *testing.T) {
 		}},
 		Status: externaldnsv1alpha1.DNSEndpointStatus{ObservedGeneration: 2},
 	}
-	inspector := Inspector{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(object).Build()}
-	list, err := inspector.Records(context.Background(), Filters{Provider: "www", RecordType: "A"})
+	inspector := inspector{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(object).Build()}
+	list, err := inspector.records(context.Background(), filters{Provider: "www", RecordType: "A"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,8 +89,8 @@ func TestDetailsCorrelatesProviderAndSource(t *testing.T) {
 		Namespace: "app", Name: "web-www", Labels: map[string]string{dnsendpoint.ManagedByLabel: dnsendpoint.ManagedByValue, dnsendpoint.ProviderLabel: "www"},
 		Annotations: map[string]string{dnsendpoint.SourceKindAnnotation: "Unknown", dnsendpoint.SourceNamespaceAnnotation: "app", dnsendpoint.SourceNameAnnotation: "web", dnsendpoint.LifecycleAnnotation: `{"version":1,"pending":[]}`},
 	}, Spec: externaldnsv1alpha1.DNSEndpointSpec{Endpoints: []*endpoint.Endpoint{{DNSName: "app.example.com", RecordType: "A", Targets: []string{"192.0.2.1"}}}}}
-	inspector := Inspector{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(provider, object).Build()}
-	details, err := inspector.Details(context.Background(), "app.example.com", Filters{}, "")
+	inspector := inspector{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(provider, object).Build()}
+	details, err := inspector.details(context.Background(), "app.example.com", filters{}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,19 +101,19 @@ func TestDetailsCorrelatesProviderAndSource(t *testing.T) {
 
 func TestOutputsAreMachineAndHumanReadable(t *testing.T) {
 	t.Parallel()
-	list := RecordList{Items: []Record{{DNSName: "app.example.com", RecordType: "A", Targets: []string{"192.0.2.1"}, Provider: "www", Source: SourceRef{Kind: "Ingress", Namespace: "app", Name: "web"}, DNSEndpoint: ObjectRef{Namespace: "app", Name: "generated"}, ExternalDNSState: "observed"}}}
+	list := recordList{Items: []record{{DNSName: "app.example.com", RecordType: "A", Targets: []string{"192.0.2.1"}, Provider: "www", Source: sourceRef{Kind: "Ingress", Namespace: "app", Name: "web"}, DNSEndpoint: objectRef{Namespace: "app", Name: "generated"}, ExternalDNSState: "observed"}}}
 	var output bytes.Buffer
-	if err := WriteRecords(&output, list); err != nil {
+	if err := writeRecordsDefault(&output, list); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(output.String(), "DNS NAME") || !strings.Contains(output.String(), "app.example.com") {
 		t.Fatalf("table output = %q", output.String())
 	}
 	output.Reset()
-	if err := WriteJSON(&output, list); err != nil {
+	if err := writeJSON(&output, list); err != nil {
 		t.Fatal(err)
 	}
-	var decoded RecordList
+	var decoded recordList
 	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
@@ -130,6 +130,139 @@ func TestObservationState(t *testing.T) {
 	}{{2, 2, "observed"}, {2, 0, "unobserved"}, {2, 1, "stale"}, {2, 3, "invalid"}} {
 		if got := observationState(test.generation, test.observed); got != test.want {
 			t.Errorf("observationState(%d, %d) = %q, want %q", test.generation, test.observed, got, test.want)
+		}
+	}
+}
+
+func TestLifecycleParseFailureIsInvalidAndLeavesActiveTargetsUnknown(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := externaldnsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	object := &externaldnsv1alpha1.DNSEndpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "app", Name: "web-www", Generation: 2,
+			Labels: map[string]string{dnsendpoint.ManagedByLabel: dnsendpoint.ManagedByValue, dnsendpoint.ProviderLabel: "www"},
+			Annotations: map[string]string{
+				dnsendpoint.SourceKindAnnotation: "Ingress", dnsendpoint.SourceNamespaceAnnotation: "app",
+				dnsendpoint.SourceNameAnnotation: "web", dnsendpoint.LifecycleAnnotation: "not-json",
+			},
+		},
+		Spec:   externaldnsv1alpha1.DNSEndpointSpec{Endpoints: []*endpoint.Endpoint{{DNSName: "app.example.com", RecordType: "A", Targets: []string{"192.0.2.1"}}}},
+		Status: externaldnsv1alpha1.DNSEndpointStatus{ObservedGeneration: 2},
+	}
+	inspector := inspector{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(object).Build()}
+	list, err := inspector.records(context.Background(), filters{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("records = %#v", list.Items)
+	}
+	record := list.Items[0]
+	if record.ExternalDNSState != stateInvalid || record.LifecycleError == "" || record.ActiveTargets != nil {
+		t.Fatalf("record = %#v, want invalid lifecycle with unknown active targets", record)
+	}
+	var output bytes.Buffer
+	if err := writeDetailsDefault(&output, recordDetails{Items: []recordDetail{{Record: record}}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "Active targets:       unknown") || !strings.Contains(output.String(), "ExternalDNS:          invalid") {
+		t.Fatalf("details output = %q", output.String())
+	}
+	var encoded bytes.Buffer
+	if err := writeJSON(&encoded, list); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(encoded.String(), `"activeTargets": null`) {
+		t.Fatalf("invalid lifecycle activeTargets should be null: %s", encoded.String())
+	}
+}
+
+func TestRecordStateCategoriesAreMutuallyExclusive(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		record record
+		want   string
+	}{
+		{name: "lifecycle error wins", record: record{LifecycleError: "bad", ExternalDNSState: stateObserved}, want: stateInvalid},
+		{name: "generation invalid", record: record{ExternalDNSState: stateInvalid}, want: stateInvalid},
+		{name: "observed", record: record{ExternalDNSState: stateObserved}, want: stateObserved},
+		{name: "unobserved is stale", record: record{ExternalDNSState: "unobserved"}, want: "stale"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := recordState(test.record); got != test.want {
+				t.Fatalf("recordState(%#v) = %q, want %q", test.record, got, test.want)
+			}
+		})
+	}
+}
+
+func TestGatewayFlagReadsOnlyManagerContainer(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name       string
+		annotation string
+		containers []corev1.Container
+		want       bool
+	}{
+		{
+			name:       "manager true and sidecar true",
+			annotation: "manager",
+			containers: []corev1.Container{{Name: "manager", Args: []string{"--enable-gateway-api=true"}}, {Name: "metrics", Args: []string{"--enable-gateway-api"}}},
+			want:       true,
+		},
+		{
+			name:       "manager false ignores sidecar",
+			annotation: "manager",
+			containers: []corev1.Container{{Name: "manager", Args: []string{"--enable-gateway-api=false"}}, {Name: "metrics", Args: []string{"--enable-gateway-api"}}},
+			want:       false,
+		},
+		{
+			name:       "command fallback",
+			containers: []corev1.Container{{Name: "controller", Command: []string{"/manager"}, Args: []string{"-enable-gateway-api"}}, {Name: "metrics", Args: []string{"--enable-gateway-api"}}},
+			want:       true,
+		},
+		{
+			name:       "kubectl default sidecar does not override manager",
+			annotation: "debug",
+			containers: []corev1.Container{{Name: "manager", Args: []string{"--enable-gateway-api=false"}}, {Name: "debug", Args: []string{"--enable-gateway-api"}}},
+			want:       false,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			template := &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: test.containers}}
+			if test.annotation != "" {
+				template.Annotations = map[string]string{defaultContainerAnnotation: test.annotation}
+			}
+			manager := managerContainer(template)
+			if manager == nil {
+				t.Fatal("manager container not found")
+			}
+			enabled, err := gatewayAPIEnabled(manager.Args)
+			if err != nil || enabled != test.want {
+				t.Fatalf("manager = %#v, enabled = %t, error = %v, want %t", manager, enabled, err, test.want)
+			}
+		})
+	}
+}
+
+func TestGatewayFlagRejectsInvalidBoolean(t *testing.T) {
+	t.Parallel()
+	if _, err := gatewayAPIEnabled([]string{"--enable-gateway-api=perhaps"}); err == nil {
+		t.Fatal("expected invalid boolean error")
+	}
+}
+
+func TestCommandRejectsInvalidRecordFiltersBeforeKubernetesAccess(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{{"list", "--source-kind=Service"}, {"list", "--record-type=TXT"}, {"show", "app.example.com", "--source-kind=service"}} {
+		command := NewCommand("test", &bytes.Buffer{}, &bytes.Buffer{})
+		command.SetArgs(args)
+		if err := command.Execute(); err == nil || !strings.Contains(err.Error(), "invalid") {
+			t.Errorf("args %v error = %v, want validation error", args, err)
 		}
 	}
 }
@@ -157,8 +290,8 @@ func TestStatusReportsHealthyControllerAndPrerequisites(t *testing.T) {
 		{GroupVersion: labdnsv1alpha1.GroupVersion.String(), APIResources: []metav1.APIResource{{Name: "dnsproviders"}}},
 		{GroupVersion: externaldnsv1alpha1.GroupVersion.String(), APIResources: []metav1.APIResource{{Name: "dnsendpoints"}}},
 	}}}
-	inspector := Inspector{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(deployment, pod).Build(), Discovery: discoveryClient}
-	status, failed := inspector.Status(context.Background(), "", "")
+	inspector := inspector{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(deployment, pod).Build(), Discovery: discoveryClient}
+	status, failed := inspector.status(context.Background(), "", "")
 	if failed || status.Overall != "healthy" || len(status.Controllers) != 1 || status.Controllers[0].ReadyPods != 1 {
 		t.Fatalf("status = %#v, failed = %t", status, failed)
 	}

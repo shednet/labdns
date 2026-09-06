@@ -18,8 +18,8 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"net"
+	"slices"
 	"testing"
 	"time"
 
@@ -28,51 +28,43 @@ import (
 
 func TestLookupDNSUsesTCPFallbackAndComparesExactSet(t *testing.T) {
 	t.Parallel()
-	packet, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := packet.LocalAddr().(*net.UDPAddr).Port
-	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", dnsPort(port)))
-	if err != nil {
-		if closeErr := packet.Close(); closeErr != nil {
-			t.Errorf("close UDP listener: %v", closeErr)
-		}
-		t.Fatal(err)
-	}
-	handler := dns.HandlerFunc(func(writer dns.ResponseWriter, request *dns.Msg) {
-		response := new(dns.Msg)
-		response.SetReply(request)
-		if writer.RemoteAddr().Network() == "udp" {
-			response.Truncated = true
-		} else {
-			response.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: request.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("192.0.2.1")}}
-		}
-		_ = writer.WriteMsg(response)
+	var networks []string
+	clients := dnsClientFactory(func(network string) dnsClient {
+		networks = append(networks, network)
+		return fakeDNSClient{network: network}
 	})
-	udpServer, tcpServer := &dns.Server{PacketConn: packet, Handler: handler}, &dns.Server{Listener: listener, Handler: handler}
-	go func() { _ = udpServer.ActivateAndServe() }()
-	go func() { _ = tcpServer.ActivateAndServe() }()
-	t.Cleanup(func() { _ = udpServer.Shutdown(); _ = tcpServer.Shutdown() })
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	result := LookupDNS(ctx, packet.LocalAddr().String(), "app.example.com", "A", []string{"192.0.2.1"})
+	result := lookupDNS(ctx, "127.0.0.1", "app.example.com", "A", []string{"192.0.2.1"}, clients)
 	if result.State != "match" || len(result.Answers) != 1 {
 		t.Fatalf("lookup = %#v", result)
 	}
+	if got, want := networks, []string{"udp", "tcp"}; !slices.Equal(got, want) {
+		t.Fatalf("DNS client networks = %v, want %v", got, want)
+	}
+}
+
+type fakeDNSClient struct {
+	network string
+}
+
+func (f fakeDNSClient) ExchangeContext(_ context.Context, request *dns.Msg, _ string) (*dns.Msg, time.Duration, error) {
+	response := new(dns.Msg)
+	response.SetReply(request)
+	if f.network == "udp" {
+		response.Truncated = true
+	} else {
+		response.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: request.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("192.0.2.1")}}
+	}
+	return response, 0, nil
 }
 
 func TestLookupDNSRejectsUnsupportedAndInvalidServers(t *testing.T) {
 	t.Parallel()
-	if result := LookupDNS(context.Background(), "bad:address:value", "app.example.com", "A", nil); result.State != "error" {
+	if result := lookupDNSDefault(context.Background(), "bad:address:value", "app.example.com", "A", nil); result.State != "error" {
 		t.Fatalf("invalid server result = %#v", result)
 	}
-	if result := LookupDNS(context.Background(), "127.0.0.1", "app.example.com", "TXT", nil); result.State != "unsupported" {
+	if result := lookupDNSDefault(context.Background(), "127.0.0.1", "app.example.com", "TXT", nil); result.State != "unsupported" {
 		t.Fatalf("unsupported result = %#v", result)
 	}
-}
-
-func dnsPort(port int) string {
-	return fmt.Sprintf("%d", port)
 }

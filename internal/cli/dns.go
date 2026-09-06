@@ -23,14 +23,29 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 )
 
 const dnsStateError = "error"
 
-func LookupDNS(ctx context.Context, server, name, recordType string, expected []string) DNSLookup {
-	result := DNSLookup{Server: server, Answers: []string{}}
+func lookupDNSDefault(ctx context.Context, server, name, recordType string, expected []string) dnsLookup {
+	return lookupDNS(ctx, server, name, recordType, expected, defaultDNSClientFactory)
+}
+
+type dnsClient interface {
+	ExchangeContext(context.Context, *dns.Msg, string) (*dns.Msg, time.Duration, error)
+}
+
+type dnsClientFactory func(network string) dnsClient
+
+func defaultDNSClientFactory(network string) dnsClient {
+	return &dns.Client{Net: network}
+}
+
+func lookupDNS(ctx context.Context, server, name, recordType string, expected []string, clients dnsClientFactory) dnsLookup {
+	result := dnsLookup{Server: server, Answers: []string{}}
 	address, err := dnsServerAddress(server)
 	if err != nil {
 		result.State, result.Error = dnsStateError, err.Error()
@@ -43,13 +58,16 @@ func LookupDNS(ctx context.Context, server, name, recordType string, expected []
 	}
 	message := new(dns.Msg)
 	message.SetQuestion(dns.Fqdn(name), queryType)
-	response, _, err := (&dns.Client{}).ExchangeContext(ctx, message, address)
+	if clients == nil {
+		clients = defaultDNSClientFactory
+	}
+	response, _, err := clients("udp").ExchangeContext(ctx, message, address)
 	if err != nil {
 		result.State, result.Error = dnsStateError, err.Error()
 		return result
 	}
 	if response.Truncated {
-		response, _, err = (&dns.Client{Net: "tcp"}).ExchangeContext(ctx, message, address)
+		response, _, err = clients("tcp").ExchangeContext(ctx, message, address)
 		if err != nil {
 			result.State, result.Error = dnsStateError, err.Error()
 			return result

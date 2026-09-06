@@ -22,6 +22,7 @@ const (
 	stateCurrent     = "current"
 	stateMissing     = "missing"
 	stateObserved    = "observed"
+	stateStale       = "stale"
 	stateInvalid     = "invalid"
 	stateUnsupported = "unsupported"
 	stateNXDomain    = "nxdomain"
@@ -29,45 +30,45 @@ const (
 	stateMismatch    = "mismatch"
 )
 
-type SourceRef struct {
+type sourceRef struct {
 	Kind      string `json:"kind"`
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
 	UID       string `json:"uid,omitempty"`
 }
 
-type ObjectRef struct {
+type objectRef struct {
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
 }
 
-type RetiringTarget struct {
+type retiringTarget struct {
 	Target   string    `json:"target"`
 	Deadline time.Time `json:"deadline"`
 }
 
-type Record struct {
+type record struct {
 	DNSName          string              `json:"dnsName"`
 	RecordType       string              `json:"recordType"`
 	Targets          []string            `json:"targets"`
 	ActiveTargets    []string            `json:"activeTargets"`
 	TTL              int64               `json:"ttl"`
 	Provider         string              `json:"provider"`
-	Source           SourceRef           `json:"source"`
-	DNSEndpoint      ObjectRef           `json:"dnsEndpoint"`
+	Source           sourceRef           `json:"source"`
+	DNSEndpoint      objectRef           `json:"dnsEndpoint"`
 	Generation       int64               `json:"generation"`
 	Observed         int64               `json:"observedGeneration"`
 	ExternalDNSState string              `json:"externalDNSState"`
-	Retiring         []RetiringTarget    `json:"retiringTargets,omitempty"`
+	Retiring         []retiringTarget    `json:"retiringTargets,omitempty"`
 	Properties       map[string][]string `json:"properties,omitempty"`
 	LifecycleError   string              `json:"lifecycleError,omitempty"`
 }
 
-type RecordList struct {
-	Items []Record `json:"items"`
+type recordList struct {
+	Items []record `json:"items"`
 }
 
-type ProviderDetail struct {
+type providerDetail struct {
 	Found      bool     `json:"found"`
 	Zones      []string `json:"zones,omitempty"`
 	IPv4Label  string   `json:"ipv4NodeLabel,omitempty"`
@@ -75,37 +76,37 @@ type ProviderDetail struct {
 	DefaultTTL int64    `json:"defaultTTL,omitempty"`
 }
 
-type SourceDetail struct {
+type sourceDetail struct {
 	Found      bool `json:"found"`
 	UIDMatches bool `json:"uidMatches"`
 }
 
-type DNSLookup struct {
+type dnsLookup struct {
 	Server  string   `json:"server"`
 	Answers []string `json:"answers,omitempty"`
 	State   string   `json:"state"`
 	Error   string   `json:"error,omitempty"`
 }
 
-type RecordDetail struct {
-	Record   Record         `json:"record"`
-	Provider ProviderDetail `json:"providerDetail"`
-	Source   SourceDetail   `json:"sourceDetail"`
-	DNS      *DNSLookup     `json:"dnsLookup,omitempty"`
+type recordDetail struct {
+	Record   record         `json:"record"`
+	Provider providerDetail `json:"providerDetail"`
+	Source   sourceDetail   `json:"sourceDetail"`
+	DNS      *dnsLookup     `json:"dnsLookup,omitempty"`
 }
 
-type RecordDetails struct {
+type recordDetails struct {
 	Query string         `json:"query"`
-	Items []RecordDetail `json:"items"`
+	Items []recordDetail `json:"items"`
 }
 
-type Prerequisite struct {
+type prerequisite struct {
 	Name      string `json:"name"`
 	Available bool   `json:"available"`
 	Error     string `json:"error,omitempty"`
 }
 
-type ControllerStatus struct {
+type controllerStatus struct {
 	Namespace  string `json:"namespace"`
 	Name       string `json:"name"`
 	Desired    int32  `json:"desiredReplicas"`
@@ -114,7 +115,7 @@ type ControllerStatus struct {
 	GatewayAPI bool   `json:"gatewayAPIEnabled"`
 }
 
-type StateSummary struct {
+type stateSummary struct {
 	Providers         int `json:"providers"`
 	PublishingSources int `json:"publishingSources"`
 	DNSEndpoints      int `json:"dnsEndpoints"`
@@ -125,10 +126,10 @@ type StateSummary struct {
 	Invalid           int `json:"invalid"`
 }
 
-type Status struct {
+type status struct {
 	Overall       string             `json:"overall"`
-	Prerequisites []Prerequisite     `json:"prerequisites"`
-	Controllers   []ControllerStatus `json:"controllers"`
-	Summary       StateSummary       `json:"summary"`
+	Prerequisites []prerequisite     `json:"prerequisites"`
+	Controllers   []controllerStatus `json:"controllers"`
+	Summary       stateSummary       `json:"summary"`
 	Warnings      []string           `json:"warnings,omitempty"`
 }
