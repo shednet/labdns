@@ -72,18 +72,30 @@ func (m *colorMode) Type() string {
 	return "string"
 }
 
-type commandOptions struct {
+type connectionOptions struct {
 	kubeconfig string
 	context    string
 	namespace  string
-	output     string
 	timeout    time.Duration
+}
+
+type recordFilterOptions struct {
 	provider   string
 	sourceKind string
 	recordType string
+}
+
+type displayOptions struct {
+	output     string
 	color      colorMode
 	getenv     func(string) (string, bool)
 	isTerminal func(io.Writer) bool
+}
+
+type commandOptions struct {
+	connection connectionOptions
+	filters    recordFilterOptions
+	display    displayOptions
 }
 
 func NewCommand(version string, stdout, stderr io.Writer) *cobra.Command {
@@ -91,7 +103,9 @@ func NewCommand(version string, stdout, stderr io.Writer) *cobra.Command {
 }
 
 func newCommand(version string, stdout, stderr io.Writer, getenv func(string) (string, bool), isTerminal func(io.Writer) bool) *cobra.Command {
-	options := &commandOptions{color: colorAuto, getenv: getenv, isTerminal: isTerminal}
+	options := &commandOptions{
+		display: displayOptions{color: colorAuto, getenv: getenv, isTerminal: isTerminal},
+	}
 	root := &cobra.Command{
 		Use:           "labdns",
 		Short:         "Inspect labdns publication state",
@@ -101,12 +115,12 @@ func newCommand(version string, stdout, stderr io.Writer, getenv func(string) (s
 	}
 	root.SetOut(stdout)
 	root.SetErr(stderr)
-	root.PersistentFlags().StringVar(&options.kubeconfig, "kubeconfig", "", "Path to the kubeconfig file")
-	root.PersistentFlags().StringVar(&options.context, "context", "", "Kubeconfig context to use")
-	root.PersistentFlags().StringVarP(&options.namespace, "namespace", "n", "", "Limit inspection to a namespace")
-	root.PersistentFlags().StringVarP(&options.output, "output", "o", "table", "Output format: table or json")
-	root.PersistentFlags().DurationVar(&options.timeout, "request-timeout", 10*time.Second, "Timeout for Kubernetes and DNS requests")
-	root.PersistentFlags().Var(&options.color, "color", "Color table output: auto, always, or never")
+	root.PersistentFlags().StringVar(&options.connection.kubeconfig, "kubeconfig", "", "Path to the kubeconfig file")
+	root.PersistentFlags().StringVar(&options.connection.context, "context", "", "Kubeconfig context to use")
+	root.PersistentFlags().StringVarP(&options.connection.namespace, "namespace", "n", "", "Limit inspection to a namespace")
+	root.PersistentFlags().StringVarP(&options.display.output, "output", "o", "table", "Output format: table or json")
+	root.PersistentFlags().DurationVar(&options.connection.timeout, "request-timeout", 10*time.Second, "Timeout for Kubernetes and DNS requests")
+	root.PersistentFlags().Var(&options.display.color, "color", "Color table output: auto, always, or never")
 
 	root.AddCommand(newListCommand(options), newShowCommand(options), newStatusCommand(options))
 	return root
@@ -116,19 +130,24 @@ func newListCommand(options *commandOptions) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "list",
 		Short: "List labdns-managed records",
-		Args:  cobra.NoArgs,
+		Args: func(command *cobra.Command, args []string) error {
+			if err := cobra.NoArgs(command, args); err != nil {
+				return err
+			}
+			return options.filters.validate()
+		},
 		RunE: func(command *cobra.Command, _ []string) error {
-			inspector, ctx, cancel, err := prepare(command.Context(), options)
+			inspector, ctx, cancel, err := prepare(command.Context(), &options.connection)
 			if err != nil {
 				return err
 			}
 			defer cancel()
-			result, err := inspector.Records(ctx, options.filters())
+			result, err := inspector.records(ctx, options.filters.filters(options.connection.namespace))
 			if err != nil {
 				return err
 			}
-			return writeOutput(command.OutOrStdout(), options.output, result, func(writer io.Writer) error {
-				return writeRecords(writer, result, options.colorizer(command))
+			return writeOutput(command.OutOrStdout(), options.display.output, result, func(writer io.Writer) error {
+				return writeRecords(writer, result, options.display.colorizer(command, options.display.output))
 			})
 		},
 	}
@@ -141,23 +160,28 @@ func newShowCommand(options *commandOptions) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "show <fqdn>",
 		Short: "Show labdns, ExternalDNS, and optional live DNS state for a record",
-		Args:  cobra.ExactArgs(1),
+		Args: func(command *cobra.Command, args []string) error {
+			if err := cobra.ExactArgs(1)(command, args); err != nil {
+				return err
+			}
+			return options.filters.validate()
+		},
 		RunE: func(command *cobra.Command, args []string) error {
 			name, err := source.NormalizeHostname(args[0])
 			if err != nil {
 				return fmt.Errorf("invalid DNS name: %w", err)
 			}
-			inspector, ctx, cancel, err := prepare(command.Context(), options)
+			inspector, ctx, cancel, err := prepare(command.Context(), &options.connection)
 			if err != nil {
 				return err
 			}
 			defer cancel()
-			result, err := inspector.Details(ctx, name, options.filters(), dnsServer)
+			result, err := inspector.details(ctx, name, options.filters.filters(options.connection.namespace), dnsServer)
 			if err != nil {
 				return err
 			}
-			if err := writeOutput(command.OutOrStdout(), options.output, result, func(writer io.Writer) error {
-				return writeDetails(writer, result, options.colorizer(command))
+			if err := writeOutput(command.OutOrStdout(), options.display.output, result, func(writer io.Writer) error {
+				return writeDetails(writer, result, options.display.colorizer(command, options.display.output))
 			}); err != nil {
 				return err
 			}
@@ -181,18 +205,18 @@ func newStatusCommand(options *commandOptions) *cobra.Command {
 		Short: "Summarize labdns health and publication state",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			inspector, ctx, cancel, err := prepare(command.Context(), options)
+			inspector, ctx, cancel, err := prepare(command.Context(), &options.connection)
 			if err != nil {
 				return err
 			}
 			defer cancel()
 			selectedNamespace := controllerNamespace
 			if selectedNamespace == "" {
-				selectedNamespace = options.namespace
+				selectedNamespace = options.connection.namespace
 			}
-			result, failed := inspector.Status(ctx, selectedNamespace, controllerName)
-			if err := writeOutput(command.OutOrStdout(), options.output, result, func(writer io.Writer) error {
-				return writeStatus(writer, result, options.colorizer(command))
+			result, failed := inspector.status(ctx, selectedNamespace, controllerName)
+			if err := writeOutput(command.OutOrStdout(), options.display.output, result, func(writer io.Writer) error {
+				return writeStatus(writer, result, options.display.colorizer(command, options.display.output))
 			}); err != nil {
 				return err
 			}
@@ -208,22 +232,50 @@ func newStatusCommand(options *commandOptions) *cobra.Command {
 }
 
 func addRecordFilters(command *cobra.Command, options *commandOptions) {
-	command.Flags().StringVar(&options.provider, "provider", "", "Limit records to a logical DNSProvider")
-	command.Flags().StringVar(&options.sourceKind, "source-kind", "", "Limit records to a source kind")
-	command.Flags().StringVar(&options.recordType, "record-type", "", "Limit records to a DNS record type")
+	command.Flags().StringVar(&options.filters.provider, "provider", "", "Limit records to a logical DNSProvider")
+	command.Flags().StringVar(&options.filters.sourceKind, "source-kind", "", "Limit records to a source kind")
+	command.Flags().StringVar(&options.filters.recordType, "record-type", "", "Limit records to a DNS record type")
 }
 
-func (o *commandOptions) filters() Filters {
-	return Filters{Namespace: o.namespace, Provider: o.provider, SourceKind: o.sourceKind, RecordType: strings.ToUpper(o.recordType)}
+func (o *recordFilterOptions) filters(namespace string) filters {
+	sourceKind, _ := canonicalFilterValue(o.sourceKind, "", string(sourceKindIngressFilter), string(sourceKindHTTPRouteFilter))
+	recordType, _ := canonicalFilterValue(o.recordType, "", string(recordTypeAFilter), string(recordTypeAAAAFilter))
+	return filters{Namespace: namespace, Provider: o.provider, SourceKind: sourceKindFilter(sourceKind), RecordType: recordTypeFilter(recordType)}
 }
 
-func prepare(parent context.Context, options *commandOptions) (Inspector, context.Context, context.CancelFunc, error) {
+func (o *recordFilterOptions) validate() error {
+	if _, err := canonicalFilterValue(o.sourceKind, "source kind", string(sourceKindIngressFilter), string(sourceKindHTTPRouteFilter)); err != nil {
+		return err
+	}
+	if _, err := canonicalFilterValue(o.recordType, "record type", string(recordTypeAFilter), string(recordTypeAAAAFilter)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func canonicalFilterValue(value, label string, allowed ...string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	for _, candidate := range allowed {
+		if strings.EqualFold(value, candidate) {
+			return candidate, nil
+		}
+	}
+	if label == "" {
+		return value, nil
+	}
+	return "", fmt.Errorf("invalid %s %q: use %s", label, value, strings.Join(allowed, " or "))
+}
+
+func prepare(parent context.Context, options *connectionOptions) (inspector, context.Context, context.CancelFunc, error) {
 	loading := clientcmd.NewDefaultClientConfigLoadingRules()
 	loading.ExplicitPath = options.kubeconfig
 	overrides := &clientcmd.ConfigOverrides{CurrentContext: options.context}
 	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loading, overrides).ClientConfig()
 	if err != nil {
-		return Inspector{}, nil, nil, fmt.Errorf("load kubeconfig: %w", err)
+		return inspector{}, nil, nil, fmt.Errorf("load kubeconfig: %w", err)
 	}
 	config.Timeout = options.timeout
 	scheme := runtime.NewScheme()
@@ -233,25 +285,25 @@ func prepare(parent context.Context, options *commandOptions) (Inspector, contex
 		gatewayv1beta1.Install,
 	} {
 		if err := add(scheme); err != nil {
-			return Inspector{}, nil, nil, fmt.Errorf("build Kubernetes scheme: %w", err)
+			return inspector{}, nil, nil, fmt.Errorf("build Kubernetes scheme: %w", err)
 		}
 	}
 	kubeClient, err := client.New(config, client.Options{Scheme: scheme})
 	if err != nil {
-		return Inspector{}, nil, nil, fmt.Errorf("create Kubernetes client: %w", err)
+		return inspector{}, nil, nil, fmt.Errorf("create Kubernetes client: %w", err)
 	}
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
 	if err != nil {
-		return Inspector{}, nil, nil, fmt.Errorf("create Kubernetes discovery client: %w", err)
+		return inspector{}, nil, nil, fmt.Errorf("create Kubernetes discovery client: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(parent, options.timeout)
-	return Inspector{Client: kubeClient, Discovery: discoveryClient}, ctx, cancel, nil
+	return inspector{Client: kubeClient, Discovery: discoveryClient}, ctx, cancel, nil
 }
 
-func (o *commandOptions) colorizer(command *cobra.Command) outputColorizer {
+func (o *displayOptions) colorizer(command *cobra.Command, output string) outputColorizer {
 	// Structured output is intended for machine consumption and must remain
 	// free of terminal control sequences regardless of the colour setting.
-	if strings.EqualFold(o.output, "json") {
+	if strings.EqualFold(output, "json") {
 		return outputColorizer{}
 	}
 	switch o.color {
@@ -285,7 +337,7 @@ func writeOutput(writer io.Writer, format string, value any, table func(io.Write
 	case "table":
 		return table(writer)
 	case "json":
-		return WriteJSON(writer, value)
+		return writeJSON(writer, value)
 	default:
 		return fmt.Errorf("invalid output format %q: use table or json", format)
 	}

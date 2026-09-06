@@ -196,17 +196,17 @@ func writeTableBlock(writer io.Writer, rows []tableRow, colorizer outputColorize
 	return nil
 }
 
-func WriteJSON(writer io.Writer, value any) error {
+func writeJSON(writer io.Writer, value any) error {
 	encoder := json.NewEncoder(writer)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(value)
 }
 
-func WriteRecords(writer io.Writer, list RecordList) error {
+func writeRecordsDefault(writer io.Writer, list recordList) error {
 	return writeRecords(writer, list, outputColorizer{})
 }
 
-func writeRecords(writer io.Writer, list RecordList, colorizer outputColorizer) error {
+func writeRecords(writer io.Writer, list recordList, colorizer outputColorizer) error {
 	rows := make([]tableRow, 0, 1+len(list.Items))
 	rows = append(rows, tableRow{
 		plainCell("NAMESPACE"), plainCell("DNS NAME"), plainCell("TYPE"), plainCell("TARGETS"), plainCell("TTL"),
@@ -227,11 +227,11 @@ func writeRecords(writer io.Writer, list RecordList, colorizer outputColorizer) 
 	return writeTable(writer, rows, colorizer)
 }
 
-func WriteDetails(writer io.Writer, details RecordDetails) error {
+func writeDetailsDefault(writer io.Writer, details recordDetails) error {
 	return writeDetails(writer, details, outputColorizer{})
 }
 
-func writeDetails(writer io.Writer, details RecordDetails, colorizer outputColorizer) error {
+func writeDetails(writer io.Writer, details recordDetails, colorizer outputColorizer) error {
 	for index, detail := range details.Items {
 		if index != 0 {
 			if err := writeString(writer, "\n"); err != nil {
@@ -245,9 +245,13 @@ func writeDetails(writer io.Writer, details RecordDetails, colorizer outputColor
 	return nil
 }
 
-func detailRows(detail RecordDetail, colorizer outputColorizer) []tableRow {
+func detailRows(detail recordDetail, colorizer outputColorizer) []tableRow {
 	item := detail.Record
 	rows := make([]tableRow, 0, 15+len(item.Retiring)+2)
+	activeTargets := strings.Join(item.ActiveTargets, ", ")
+	if item.LifecycleError != "" {
+		activeTargets = "unknown"
+	}
 	rows = append(rows,
 		tableRow{plainCell("DNS name:"), plainCell(item.DNSName)},
 		tableRow{plainCell("Type:"), plainCell(item.RecordType)},
@@ -256,7 +260,7 @@ func detailRows(detail RecordDetail, colorizer outputColorizer) []tableRow {
 		tableRow{plainCell("Source state:"), colorizer.state(foundState(detail.Source.Found, detail.Source.UIDMatches))},
 		tableRow{plainCell("DNSEndpoint:"), plainCell(item.DNSEndpoint.Namespace + "/" + item.DNSEndpoint.Name)},
 		tableRow{plainCell("Targets:"), plainCell(strings.Join(item.Targets, ", "))},
-		tableRow{plainCell("Active targets:"), plainCell(strings.Join(item.ActiveTargets, ", "))},
+		tableRow{plainCell("Active targets:"), plainCell(activeTargets)},
 		tableRow{plainCell("TTL:"), plainCell(strconv.FormatInt(item.TTL, 10))},
 		tableRow{plainCell("ExternalDNS:"), externalDNSCell(colorizer, item.ExternalDNSState, item.Generation, item.Observed)},
 		tableRow{plainCell("Provider state:"), colorizer.state(presentState(detail.Provider.Found))},
@@ -287,7 +291,7 @@ func externalDNSCell(colorizer outputColorizer, state string, generation, observ
 	)
 }
 
-func dnsLookupCell(colorizer outputColorizer, lookup *DNSLookup) tableCell {
+func dnsLookupCell(colorizer outputColorizer, lookup *dnsLookup) tableCell {
 	return colorizer.composite(
 		tableSegment{text: strings.Join(lookup.Answers, ", ") + " via "},
 		tableSegment{text: lookup.Server},
@@ -297,11 +301,11 @@ func dnsLookupCell(colorizer outputColorizer, lookup *DNSLookup) tableCell {
 	)
 }
 
-func WriteStatus(writer io.Writer, status Status) error {
+func writeStatusDefault(writer io.Writer, status status) error {
 	return writeStatus(writer, status, outputColorizer{})
 }
 
-func writeStatus(writer io.Writer, status Status, colorizer outputColorizer) error {
+func writeStatus(writer io.Writer, status status, colorizer outputColorizer) error {
 	rows := make([]tableRow, 0, 3+len(status.Prerequisites)+2+len(status.Controllers)+3+len(status.Warnings))
 	rows = append(rows, tableRow{plainCell("OVERALL"), colorizer.state(strings.ToUpper(status.Overall))}, nil, tableRow{
 		plainCell("PREREQUISITE"), plainCell("AVAILABLE"), plainCell("ERROR"),
@@ -378,7 +382,7 @@ func colorForState(state string) ansiColor {
 	switch strings.ToLower(state) {
 	case "healthy", stateCurrent, stateObserved, stateMatch:
 		return ansiGreenColor
-	case "unobserved", "stale", "pending", "degraded", "warning", "retiring":
+	case "unobserved", stateStale, "pending", "degraded", "warning", "retiring":
 		return ansiYellowColor
 	case "unhealthy", stateInvalid, stateMissing, "uid mismatch", stateMismatch, stateNXDomain, stateUnsupported, "error", "unavailable", "failed":
 		return ansiRedColor

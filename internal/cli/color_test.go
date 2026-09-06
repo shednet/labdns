@@ -50,7 +50,7 @@ func TestColorizerModeAndEnvironment(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			options := &commandOptions{
+			options := &commandOptions{display: displayOptions{
 				color:  test.mode,
 				output: test.output,
 				getenv: func(name string) (string, bool) {
@@ -64,10 +64,10 @@ func TestColorizerModeAndEnvironment(t *testing.T) {
 					}
 				},
 				isTerminal: func(io.Writer) bool { return test.tty },
-			}
+			}}
 			command := &cobra.Command{Use: "test"}
 			command.SetOut(&bytes.Buffer{})
-			if got := options.colorizer(command).enabled; got != test.want {
+			if got := options.display.colorizer(command, options.display.output).enabled; got != test.want {
 				t.Fatalf("color enabled = %t, want %t", got, test.want)
 			}
 		})
@@ -114,20 +114,20 @@ func TestCommandMetadataOutputIsPlain(t *testing.T) {
 func TestColoredTablesKeepPlainLayout(t *testing.T) {
 	t.Parallel()
 	deadline := time.Date(2026, time.September, 2, 0, 0, 0, 0, time.UTC)
-	list := RecordList{Items: []Record{{
+	list := recordList{Items: []record{{
 		DNSName: "app.example.com", RecordType: "A", Targets: []string{"192.0.2.1"}, TTL: 60,
-		Provider: "www", Source: SourceRef{Kind: "Ingress", Namespace: "app", Name: "web"},
-		DNSEndpoint: ObjectRef{Namespace: "app", Name: "generated"}, ExternalDNSState: "observed",
-		Retiring: []RetiringTarget{{Target: "192.0.2.2", Deadline: deadline}},
+		Provider: "www", Source: sourceRef{Kind: "Ingress", Namespace: "app", Name: "web"},
+		DNSEndpoint: objectRef{Namespace: "app", Name: "generated"}, ExternalDNSState: "observed",
+		Retiring: []retiringTarget{{Target: "192.0.2.2", Deadline: deadline}},
 	}}}
-	details := RecordDetails{Items: []RecordDetail{{
-		Record: list.Items[0], Provider: ProviderDetail{Found: true}, Source: SourceDetail{Found: true, UIDMatches: true},
-		DNS: &DNSLookup{Answers: []string{"192.0.2.1"}, Server: "10.0.0.53", State: "match"},
+	details := recordDetails{Items: []recordDetail{{
+		Record: list.Items[0], Provider: providerDetail{Found: true}, Source: sourceDetail{Found: true, UIDMatches: true},
+		DNS: &dnsLookup{Answers: []string{"192.0.2.1"}, Server: "10.0.0.53", State: "match"},
 	}}}
-	status := Status{
-		Overall: "healthy", Prerequisites: []Prerequisite{{Name: "DNSProvider CRD", Available: true}},
-		Controllers: []ControllerStatus{{Namespace: "labdns-system", Name: "labdns", Desired: 1, Available: 1, ReadyPods: 1}},
-		Summary:     StateSummary{Providers: 1, PublishingSources: 1, DNSEndpoints: 1, Records: 1, Observed: 1},
+	status := status{
+		Overall: "healthy", Prerequisites: []prerequisite{{Name: "DNSProvider CRD", Available: true}},
+		Controllers: []controllerStatus{{Namespace: "labdns-system", Name: "labdns", Desired: 1, Available: 1, ReadyPods: 1}},
+		Summary:     stateSummary{Providers: 1, PublishingSources: 1, DNSEndpoints: 1, Records: 1, Observed: 1},
 		Warnings:    []string{"publication delayed"},
 	}
 	for _, test := range []struct {
@@ -135,9 +135,9 @@ func TestColoredTablesKeepPlainLayout(t *testing.T) {
 		write    func(io.Writer) error
 		writeCol func(io.Writer) error
 	}{
-		{name: "records", write: func(w io.Writer) error { return WriteRecords(w, list) }, writeCol: func(w io.Writer) error { return writeRecords(w, list, outputColorizer{enabled: true}) }},
-		{name: "details", write: func(w io.Writer) error { return WriteDetails(w, details) }, writeCol: func(w io.Writer) error { return writeDetails(w, details, outputColorizer{enabled: true}) }},
-		{name: "status", write: func(w io.Writer) error { return WriteStatus(w, status) }, writeCol: func(w io.Writer) error { return writeStatus(w, status, outputColorizer{enabled: true}) }},
+		{name: "records", write: func(w io.Writer) error { return writeRecordsDefault(w, list) }, writeCol: func(w io.Writer) error { return writeRecords(w, list, outputColorizer{enabled: true}) }},
+		{name: "details", write: func(w io.Writer) error { return writeDetailsDefault(w, details) }, writeCol: func(w io.Writer) error { return writeDetails(w, details, outputColorizer{enabled: true}) }},
+		{name: "status", write: func(w io.Writer) error { return writeStatusDefault(w, status) }, writeCol: func(w io.Writer) error { return writeStatus(w, status, outputColorizer{enabled: true}) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var plain, colored bytes.Buffer
@@ -207,14 +207,14 @@ func TestTablePropagatesShortWrites(t *testing.T) {
 
 func TestPlainStatusLayoutRegression(t *testing.T) {
 	t.Parallel()
-	status := Status{
+	status := status{
 		Overall:       "healthy",
-		Prerequisites: []Prerequisite{{Name: "DNSProvider CRD", Available: true}},
-		Controllers:   []ControllerStatus{{Namespace: "labdns-system", Name: "labdns", Desired: 1, Available: 1, ReadyPods: 1}},
-		Summary:       StateSummary{Providers: 1, PublishingSources: 1, DNSEndpoints: 1, Records: 1, Observed: 1},
+		Prerequisites: []prerequisite{{Name: "DNSProvider CRD", Available: true}},
+		Controllers:   []controllerStatus{{Namespace: "labdns-system", Name: "labdns", Desired: 1, Available: 1, ReadyPods: 1}},
+		Summary:       stateSummary{Providers: 1, PublishingSources: 1, DNSEndpoints: 1, Records: 1, Observed: 1},
 	}
 	var output bytes.Buffer
-	if err := WriteStatus(&output, status); err != nil {
+	if err := writeStatusDefault(&output, status); err != nil {
 		t.Fatal(err)
 	}
 	want := "OVERALL  HEALTHY\n" +
@@ -235,19 +235,19 @@ func TestPlainStatusLayoutRegression(t *testing.T) {
 func TestSemanticLocationsAreColoredAndIdentifiersRemainPlain(t *testing.T) {
 	t.Parallel()
 	deadline := time.Date(2026, time.September, 2, 0, 0, 0, 0, time.UTC)
-	details := RecordDetails{Items: []RecordDetail{{
-		Record: Record{
-			DNSName: "app.example.com", Provider: "www", Source: SourceRef{Kind: "Ingress", Namespace: "app", Name: "web"},
-			DNSEndpoint: ObjectRef{Namespace: "app", Name: "generated"}, ExternalDNSState: "invalid",
-			Retiring: []RetiringTarget{{Target: "192.0.2.1", Deadline: deadline}}, LifecycleError: "bad lifecycle",
+	details := recordDetails{Items: []recordDetail{{
+		Record: record{
+			DNSName: "app.example.com", Provider: "www", Source: sourceRef{Kind: "Ingress", Namespace: "app", Name: "web"},
+			DNSEndpoint: objectRef{Namespace: "app", Name: "generated"}, ExternalDNSState: "invalid",
+			Retiring: []retiringTarget{{Target: "192.0.2.1", Deadline: deadline}}, LifecycleError: "bad lifecycle",
 		},
-		Provider: ProviderDetail{Found: false}, Source: SourceDetail{Found: false},
-		DNS: &DNSLookup{Server: "10.0.0.53", State: "error", Error: "lookup failed"},
+		Provider: providerDetail{Found: false}, Source: sourceDetail{Found: false},
+		DNS: &dnsLookup{Server: "10.0.0.53", State: "error", Error: "lookup failed"},
 	}}}
-	status := Status{
-		Overall: "unhealthy", Prerequisites: []Prerequisite{{Name: "DNSProvider CRD", Available: false, Error: "not installed"}},
-		Controllers: []ControllerStatus{{Namespace: "labdns-system", Name: "labdns", Desired: 2, Available: 1, ReadyPods: 1}},
-		Summary:     StateSummary{PendingTargets: 1, Observed: 1, Stale: 1, Invalid: 1},
+	status := status{
+		Overall: "unhealthy", Prerequisites: []prerequisite{{Name: "DNSProvider CRD", Available: false, Error: "not installed"}},
+		Controllers: []controllerStatus{{Namespace: "labdns-system", Name: "labdns", Desired: 2, Available: 1, ReadyPods: 1}},
+		Summary:     stateSummary{PendingTargets: 1, Observed: 1, Stale: 1, Invalid: 1},
 		Warnings:    []string{"publication delayed"},
 	}
 	var output bytes.Buffer
@@ -334,14 +334,14 @@ func TestStatusAvailabilityColorMapping(t *testing.T) {
 func TestJSONOutputNeverContainsANSI(t *testing.T) {
 	t.Parallel()
 	var output bytes.Buffer
-	value := RecordList{Items: []Record{{DNSName: "app.example.com", ExternalDNSState: "observed"}}}
-	if err := WriteJSON(&output, value); err != nil {
+	value := recordList{Items: []record{{DNSName: "app.example.com", ExternalDNSState: "observed"}}}
+	if err := writeJSON(&output, value); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(output.String(), "\x1b") {
 		t.Fatalf("JSON contains ANSI: %q", output.String())
 	}
-	var decoded RecordList
+	var decoded recordList
 	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
