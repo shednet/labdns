@@ -34,9 +34,23 @@ import (
 
 const serviceKind = "Service"
 
+type SourceKind string
+
+const (
+	SourceKindIngress   SourceKind = "Ingress"
+	SourceKindHTTPRoute SourceKind = "HTTPRoute"
+)
+
+type RecordType string
+
+const (
+	RecordTypeA    RecordType = "A"
+	RecordTypeAAAA RecordType = "AAAA"
+)
+
 type Identity struct {
 	APIVersion string
-	Kind       string
+	Kind       SourceKind
 	Namespace  string
 	Name       string
 	UID        types.UID
@@ -61,7 +75,7 @@ type Property struct {
 
 type Record struct {
 	DNSName          string
-	RecordType       string
+	RecordType       RecordType
 	Targets          []string
 	TTL              int64
 	ProviderSpecific []Property
@@ -239,7 +253,7 @@ func backendSet(values map[Backend]struct{}) []Backend {
 	return result
 }
 
-func ProviderProperties(provider *labdnsv1alpha1.DNSProvider, annotations map[string]string) ([]Property, map[string]string) {
+func providerProperties(provider *labdnsv1alpha1.DNSProvider, annotations map[string]string) ([]Property, map[string]string) {
 	properties := map[string]string{}
 	for _, property := range provider.Spec.ProviderSpecific.Defaults {
 		properties[property.Name] = property.Value

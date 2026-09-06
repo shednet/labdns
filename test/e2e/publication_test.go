@@ -125,107 +125,109 @@ var _ = AfterSuite(func() {
 	}
 })
 
-var _ = Describe("the real split-horizon publication path", Ordered, func() {
-	It("publishes exact provider-isolated multi-node A and AAAA sets", func(ctx SpecContext) {
-		createWorkload(ctx)
+var _ = Describe("the real split-horizon publication path", func() {
+	It("publishes, updates, and retires provider-isolated records", func(ctx SpecContext) {
+		By("publishing exact provider-isolated multi-node A and AAAA sets", func() {
+			createWorkload(ctx)
 
-		wwwExpected := []addressPair{publicInitial[0], publicInitial[1]}
-		vpnExpected := []addressPair{vpnInitial[0], vpnInitial[1]}
-		assertDNSEventually(ctx, wwwDNS, wwwExpected, normalTimeout)
-		assertDNSEventually(ctx, vpnDNS, vpnExpected, normalTimeout)
-		assertGeneratedEndpoints(ctx, wwwExpected, vpnExpected, false)
-		assertEtcdOwnership(ctx, "www", ownerWWW, wwwExpected)
-		assertEtcdOwnership(ctx, "vpn", ownerVPN, vpnExpected)
+			wwwExpected := []addressPair{publicInitial[0], publicInitial[1]}
+			vpnExpected := []addressPair{vpnInitial[0], vpnInitial[1]}
+			assertDNSEventually(ctx, wwwDNS, wwwExpected, normalTimeout)
+			assertDNSEventually(ctx, vpnDNS, vpnExpected, normalTimeout)
+			assertGeneratedEndpoints(ctx, wwwExpected, vpnExpected, false)
+			assertEtcdOwnership(ctx, "www", ownerWWW, wwwExpected)
+			assertEtcdOwnership(ctx, "vpn", ownerVPN, vpnExpected)
 
-		putForeignRecord(ctx, "www")
-		putForeignRecord(ctx, "vpn")
-		assertForeignRecord(ctx, "www")
-		assertForeignRecord(ctx, "vpn")
-	})
+			putForeignRecord(ctx, "www")
+			putForeignRecord(ctx, "vpn")
+			assertForeignRecord(ctx, "www")
+			assertForeignRecord(ctx, "vpn")
+		})
 
-	It("converges from events after ExternalDNS restarts and Node labels change", func(ctx SpecContext) {
-		restartDeployment(ctx, "external-dns-www")
-		restartDeployment(ctx, "external-dns-vpn")
+		By("converges from events after ExternalDNS restarts and Node labels change", func() {
+			restartDeployment(ctx, "external-dns-www")
+			restartDeployment(ctx, "external-dns-vpn")
 
-		updatedWWW := addressPair{"192.0.2.111", "2001:db8:1::111"}
-		updatedVPN := addressPair{"198.51.100.111", "2001:db8:2::111"}
-		setNodeAddresses(ctx, &nodes[0], updatedWWW, updatedVPN)
-		wwwDuringGrace := []addressPair{publicInitial[0], updatedWWW, publicInitial[1]}
-		vpnDuringGrace := []addressPair{vpnInitial[0], updatedVPN, vpnInitial[1]}
-		assertDNSEventually(ctx, wwwDNS, wwwDuringGrace, normalTimeout)
-		assertDNSEventually(ctx, vpnDNS, vpnDuringGrace, normalTimeout)
-		assertGeneratedEndpoints(ctx, wwwDuringGrace, vpnDuringGrace, true)
+			updatedWWW := addressPair{"192.0.2.111", "2001:db8:1::111"}
+			updatedVPN := addressPair{"198.51.100.111", "2001:db8:2::111"}
+			setNodeAddresses(ctx, &nodes[0], updatedWWW, updatedVPN)
+			wwwDuringGrace := []addressPair{publicInitial[0], updatedWWW, publicInitial[1]}
+			vpnDuringGrace := []addressPair{vpnInitial[0], updatedVPN, vpnInitial[1]}
+			assertDNSEventually(ctx, wwwDNS, wwwDuringGrace, normalTimeout)
+			assertDNSEventually(ctx, vpnDNS, vpnDuringGrace, normalTimeout)
+			assertGeneratedEndpoints(ctx, wwwDuringGrace, vpnDuringGrace, true)
 
-		wwwExpected := []addressPair{updatedWWW, publicInitial[1]}
-		vpnExpected := []addressPair{updatedVPN, vpnInitial[1]}
-		assertDNSEventually(ctx, wwwDNS, wwwExpected, deletionDelay+normalTimeout)
-		assertDNSEventually(ctx, vpnDNS, vpnExpected, deletionDelay+normalTimeout)
-		assertGeneratedEndpoints(ctx, wwwExpected, vpnExpected, false)
-		assertForeignRecord(ctx, "www")
-		assertForeignRecord(ctx, "vpn")
-	})
+			wwwExpected := []addressPair{updatedWWW, publicInitial[1]}
+			vpnExpected := []addressPair{updatedVPN, vpnInitial[1]}
+			assertDNSEventually(ctx, wwwDNS, wwwExpected, deletionDelay+normalTimeout)
+			assertDNSEventually(ctx, vpnDNS, vpnExpected, deletionDelay+normalTimeout)
+			assertGeneratedEndpoints(ctx, wwwExpected, vpnExpected, false)
+			assertForeignRecord(ctx, "www")
+			assertForeignRecord(ctx, "vpn")
+		})
 
-	It("retains only the removed target until its per-target grace expires", func(ctx SpecContext) {
-		setEndpointPlacement(ctx, nodes[0].Name, nodes[1].Name, nodes[2].Name)
-		updatedWWW := addressPair{"192.0.2.111", "2001:db8:1::111"}
-		updatedVPN := addressPair{"198.51.100.111", "2001:db8:2::111"}
-		wwwDuringGrace := []addressPair{updatedWWW, publicInitial[1], publicInitial[2]}
-		vpnDuringGrace := []addressPair{updatedVPN, vpnInitial[1], vpnInitial[2]}
-		assertDNSEventually(ctx, wwwDNS, wwwDuringGrace, normalTimeout)
-		assertDNSEventually(ctx, vpnDNS, vpnDuringGrace, normalTimeout)
-		assertGeneratedEndpoints(ctx, wwwDuringGrace, vpnDuringGrace, true)
+		By("retains only the removed target until its per-target grace expires", func() {
+			setEndpointPlacement(ctx, nodes[0].Name, nodes[1].Name, nodes[2].Name)
+			updatedWWW := addressPair{"192.0.2.111", "2001:db8:1::111"}
+			updatedVPN := addressPair{"198.51.100.111", "2001:db8:2::111"}
+			wwwDuringGrace := []addressPair{updatedWWW, publicInitial[1], publicInitial[2]}
+			vpnDuringGrace := []addressPair{updatedVPN, vpnInitial[1], vpnInitial[2]}
+			assertDNSEventually(ctx, wwwDNS, wwwDuringGrace, normalTimeout)
+			assertDNSEventually(ctx, vpnDNS, vpnDuringGrace, normalTimeout)
+			assertGeneratedEndpoints(ctx, wwwDuringGrace, vpnDuringGrace, true)
 
-		wwwAfterGrace := []addressPair{updatedWWW, publicInitial[2]}
-		vpnAfterGrace := []addressPair{updatedVPN, vpnInitial[2]}
-		assertDNSEventually(ctx, wwwDNS, wwwAfterGrace, deletionDelay+normalTimeout)
-		assertDNSEventually(ctx, vpnDNS, vpnAfterGrace, deletionDelay+normalTimeout)
-		assertGeneratedEndpoints(ctx, wwwAfterGrace, vpnAfterGrace, false)
-		assertEtcdOwnership(ctx, "www", ownerWWW, wwwAfterGrace)
-		assertEtcdOwnership(ctx, "vpn", ownerVPN, vpnAfterGrace)
-	})
+			wwwAfterGrace := []addressPair{updatedWWW, publicInitial[2]}
+			vpnAfterGrace := []addressPair{updatedVPN, vpnInitial[2]}
+			assertDNSEventually(ctx, wwwDNS, wwwAfterGrace, deletionDelay+normalTimeout)
+			assertDNSEventually(ctx, vpnDNS, vpnAfterGrace, deletionDelay+normalTimeout)
+			assertGeneratedEndpoints(ctx, wwwAfterGrace, vpnAfterGrace, false)
+			assertEtcdOwnership(ctx, "www", ownerWWW, wwwAfterGrace)
+			assertEtcdOwnership(ctx, "vpn", ownerVPN, vpnAfterGrace)
+		})
 
-	It("keeps DNS during source deletion grace and resumes expiry after a labdns restart", func(ctx SpecContext) {
-		wwwExpected := []addressPair{{"192.0.2.111", "2001:db8:1::111"}, publicInitial[2]}
-		vpnExpected := []addressPair{{"198.51.100.111", "2001:db8:2::111"}, vpnInitial[2]}
-		createDeletionWorkload(ctx)
-		assertRecordSetEventually(ctx, wwwDNS, deletionHost, dns.TypeA, []string{"192.0.2.111"}, normalTimeout)
-		assertRecordSetEventually(ctx, wwwDNS, deletionHost, dns.TypeAAAA, nil, normalTimeout)
-		assertRecordSetEventually(ctx, vpnDNS, deletionHost, dns.TypeA, nil, normalTimeout)
-		assertSingleAddressOwnership(ctx, "www", deletionHost, ownerWWW, "192.0.2.111")
+		By("keeps DNS during source deletion grace and resumes expiry after a labdns restart", func() {
+			wwwExpected := []addressPair{{"192.0.2.111", "2001:db8:1::111"}, publicInitial[2]}
+			vpnExpected := []addressPair{{"198.51.100.111", "2001:db8:2::111"}, vpnInitial[2]}
+			createDeletionWorkload(ctx)
+			assertRecordSetEventually(ctx, wwwDNS, deletionHost, dns.TypeA, []string{"192.0.2.111"}, normalTimeout)
+			assertRecordSetEventually(ctx, wwwDNS, deletionHost, dns.TypeAAAA, nil, normalTimeout)
+			assertRecordSetEventually(ctx, vpnDNS, deletionHost, dns.TypeA, nil, normalTimeout)
+			assertSingleAddressOwnership(ctx, "www", deletionHost, ownerWWW, "192.0.2.111")
 
-		// ExternalDNS v0.21.0's CoreDNS reader cannot preserve every etcd key
-		// identity while combining a whole multi-target dual-stack name. The
-		// separate single-target source keeps this restart check on a genuine
-		// lifecycle event; the preceding cases cover exact shared RRset changes.
-		ingress := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: "deletion-contract", Namespace: workNamespace}}
-		deletedAt := time.Now()
-		Expect(kubeClient.Delete(ctx, ingress)).To(Succeed())
-		Eventually(func(g Gomega) {
-			var current networkingv1.Ingress
-			g.Expect(apierrors.IsNotFound(kubeClient.Get(ctx, types.NamespacedName{Namespace: workNamespace, Name: "deletion-contract"}, &current))).To(BeTrue())
-		}, normalTimeout, 200*time.Millisecond).Should(Succeed())
-		assertDeletionEndpointPending(ctx)
-		assertRecordSetNow(ctx, wwwDNS, deletionHost, dns.TypeA, []string{"192.0.2.111"})
+			// ExternalDNS v0.21.0's CoreDNS reader cannot preserve every etcd key
+			// identity while combining a whole multi-target dual-stack name. The
+			// separate single-target source keeps this restart check on a genuine
+			// lifecycle event; the preceding cases cover exact shared RRset changes.
+			ingress := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: "deletion-contract", Namespace: workNamespace}}
+			deletedAt := time.Now()
+			Expect(kubeClient.Delete(ctx, ingress)).To(Succeed())
+			Eventually(func(g Gomega) {
+				var current networkingv1.Ingress
+				g.Expect(apierrors.IsNotFound(kubeClient.Get(ctx, types.NamespacedName{Namespace: workNamespace, Name: "deletion-contract"}, &current))).To(BeTrue())
+			}, normalTimeout, 200*time.Millisecond).Should(Succeed())
+			assertDeletionEndpointPending(ctx)
+			assertRecordSetNow(ctx, wwwDNS, deletionHost, dns.TypeA, []string{"192.0.2.111"})
 
-		restartDeployment(ctx, "labdns")
-		Eventually(func(g Gomega) {
-			var objects externaldnsv1alpha1.DNSEndpointList
-			g.Expect(kubeClient.List(ctx, &objects, client.InNamespace(workNamespace), client.MatchingLabels{
-				"app.kubernetes.io/managed-by": "labdns",
-				"labdns.shednet.dev/provider":  "www",
-			})).To(Succeed())
-			for i := range objects.Items {
-				g.Expect(objects.Items[i].Annotations["labdns.shednet.dev/source-name"]).NotTo(Equal("deletion-contract"))
-			}
-		}, deletionDelay+normalTimeout, 200*time.Millisecond).Should(Succeed())
-		remaining := time.Until(deletedAt.Add(deletionDelay + normalTimeout))
-		Expect(remaining).To(BeNumerically(">", 0), "ExternalDNS exceeded deletion grace plus convergence allowance")
-		assertRecordSetEventually(ctx, wwwDNS, deletionHost, dns.TypeA, nil, remaining)
-		assertNoEtcdHostname(ctx, "www", deletionHost)
-		assertDNSNow(ctx, wwwDNS, wwwExpected)
-		assertDNSNow(ctx, vpnDNS, vpnExpected)
-		assertForeignRecord(ctx, "www")
-		assertForeignRecord(ctx, "vpn")
+			restartDeployment(ctx, "labdns")
+			Eventually(func(g Gomega) {
+				var objects externaldnsv1alpha1.DNSEndpointList
+				g.Expect(kubeClient.List(ctx, &objects, client.InNamespace(workNamespace), client.MatchingLabels{
+					"app.kubernetes.io/managed-by": "labdns",
+					"labdns.shednet.dev/provider":  "www",
+				})).To(Succeed())
+				for i := range objects.Items {
+					g.Expect(objects.Items[i].Annotations["labdns.shednet.dev/source-name"]).NotTo(Equal("deletion-contract"))
+				}
+			}, deletionDelay+normalTimeout, 200*time.Millisecond).Should(Succeed())
+			remaining := time.Until(deletedAt.Add(deletionDelay + normalTimeout))
+			Expect(remaining).To(BeNumerically(">", 0), "ExternalDNS exceeded deletion grace plus convergence allowance")
+			assertRecordSetEventually(ctx, wwwDNS, deletionHost, dns.TypeA, nil, remaining)
+			assertNoEtcdHostname(ctx, "www", deletionHost)
+			assertDNSNow(ctx, wwwDNS, wwwExpected)
+			assertDNSNow(ctx, vpnDNS, vpnExpected)
+			assertForeignRecord(ctx, "www")
+			assertForeignRecord(ctx, "vpn")
+		})
 	})
 })
 

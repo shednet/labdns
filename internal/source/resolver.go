@@ -26,6 +26,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	labdnsv1alpha1 "github.com/shednet/labdns/api/v1alpha1"
@@ -35,16 +36,23 @@ type Resolver struct {
 	Reader client.Reader
 }
 
+type PublicationOptions struct {
+	Families      []AddressFamily
+	Annotations   map[string]string
+	TTL           *int64
+	DeletionDelay *time.Duration
+}
+
 func (r Resolver) Publications(
 	ctx context.Context,
 	projection []HostProjection,
 	providers []*labdnsv1alpha1.DNSProvider,
-	parsed ParsedAnnotations,
+	options PublicationOptions,
 	warn WarningFunc,
 ) ([]Publication, error) {
 	result := make([]Publication, 0, len(providers))
 	for _, provider := range providers {
-		publication, err := r.publication(ctx, projection, provider, parsed, warn)
+		publication, err := r.publication(ctx, projection, provider, options, warn)
 		if err != nil {
 			return nil, err
 		}
@@ -58,10 +66,10 @@ func (r Resolver) publication(
 	ctx context.Context,
 	projection []HostProjection,
 	provider *labdnsv1alpha1.DNSProvider,
-	parsed ParsedAnnotations,
+	options PublicationOptions,
 	warn WarningFunc,
 ) (Publication, error) {
-	families := parsed.Families
+	families := options.Families
 	if len(families) == 0 {
 		if provider.Spec.IPSources.IPv4 != nil {
 			families = append(families, IPv4)
@@ -70,20 +78,20 @@ func (r Resolver) publication(
 			families = append(families, IPv6)
 		}
 	}
-	properties, metadata := ProviderProperties(provider, parsed.Resolved)
+	properties, metadata := providerProperties(provider, options.Annotations)
 	ttl := provider.Spec.RecordDefaults.TTL
 	if ttl == 0 {
 		ttl = 300
 	}
-	if parsed.TTL != nil {
-		ttl = *parsed.TTL
+	if options.TTL != nil {
+		ttl = *options.TTL
 	}
 	delay := 60 * time.Second
 	if provider.Spec.RecordDefaults.DeletionDelay != nil {
 		delay = provider.Spec.RecordDefaults.DeletionDelay.Duration
 	}
-	if parsed.DeletionDelay != nil {
-		delay = *parsed.DeletionDelay
+	if options.DeletionDelay != nil {
+		delay = *options.DeletionDelay
 	}
 	publication := Publication{ProviderName: provider.Name, MetadataAnnotations: metadata, DeletionDelay: delay}
 	zones := make([]string, 0, len(provider.Spec.Zones))
@@ -91,7 +99,7 @@ func (r Resolver) publication(
 		zones = append(zones, zone.Name)
 	}
 	for _, host := range projection {
-		if MatchingZone(host.Hostname, zones) == "" {
+		if matchingZone(host.Hostname, zones) == "" {
 			if warn != nil {
 				warn("HostnameOutsideZones", fmt.Sprintf("hostname %q is outside DNSProvider %q zones", host.Hostname, provider.Name))
 			}
@@ -114,9 +122,9 @@ func (r Resolver) publication(
 			if len(values) == 0 {
 				continue
 			}
-			recordType := "A"
+			recordType := RecordTypeA
 			if family == IPv6 {
-				recordType = "AAAA"
+				recordType = RecordTypeAAAA
 			}
 			publication.Records = append(publication.Records, Record{DNSName: host.Hostname, RecordType: recordType, Targets: values, TTL: ttl, ProviderSpecific: properties})
 		}
@@ -133,11 +141,15 @@ func (r Resolver) publication(
 func (r Resolver) backendTargets(ctx context.Context, backend Backend, provider *labdnsv1alpha1.DNSProvider, families []AddressFamily) (map[AddressFamily][]string, error) {
 	var service corev1.Service
 	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: backend.Namespace, Name: backend.Name}, &service); err != nil {
-		return nil, fmt.Errorf("get Service %s: %w", backend.Key(), err)
+		wrapped := fmt.Errorf("get Service %s: %w", backend.Key(), err)
+		if apierrors.IsNotFound(err) {
+			return nil, Invalid(dependency("ServiceNotFound", wrapped))
+		}
+		return nil, dependency("ServiceReadFailed", wrapped)
 	}
 	var slices discoveryv1.EndpointSliceList
 	if err := r.Reader.List(ctx, &slices, client.InNamespace(backend.Namespace), client.MatchingLabels{discoveryv1.LabelServiceName: backend.Name}); err != nil {
-		return nil, fmt.Errorf("list EndpointSlices for Service %s: %w", backend.Key(), err)
+		return nil, dependency("EndpointSliceReadFailed", fmt.Errorf("list EndpointSlices for Service %s: %w", backend.Key(), err))
 	}
 	nodeNames := map[string]struct{}{}
 	for i := range slices.Items {
@@ -155,7 +167,11 @@ func (r Resolver) backendTargets(ctx context.Context, backend Backend, provider 
 	for nodeName := range nodeNames {
 		var node corev1.Node
 		if err := r.Reader.Get(ctx, client.ObjectKey{Name: nodeName}, &node); err != nil {
-			return nil, fmt.Errorf("get Node %s for Service %s: %w", nodeName, backend.Key(), err)
+			wrapped := fmt.Errorf("get Node %s for Service %s: %w", nodeName, backend.Key(), err)
+			if apierrors.IsNotFound(err) {
+				return nil, Invalid(dependency("NodeNotFound", wrapped))
+			}
+			return nil, dependency("NodeReadFailed", wrapped)
 		}
 		for _, family := range families {
 			label := labelFor(provider, family)
@@ -182,34 +198,34 @@ func (r Resolver) backendTargets(ctx context.Context, backend Backend, provider 
 func parseNodeAddress(value string, family AddressFamily) (netip.Addr, error) {
 	if family == IPv4 {
 		if strings.HasPrefix(value, "v6-") {
-			return netip.Addr{}, fmt.Errorf("IPv4 values must not use the v6- prefix")
+			return netip.Addr{}, Invalid(fmt.Errorf("IPv4 values must not use the v6- prefix"))
 		}
 		address, err := netip.ParseAddr(value)
 		if err != nil {
-			return netip.Addr{}, err
+			return netip.Addr{}, Invalid(err)
 		}
 		if !address.Is4() {
-			return netip.Addr{}, fmt.Errorf("address is not ipv4")
+			return netip.Addr{}, Invalid(fmt.Errorf("address is not ipv4"))
 		}
 		return address, nil
 	}
 	if family != IPv6 {
-		return netip.Addr{}, fmt.Errorf("unsupported address family %q", family)
+		return netip.Addr{}, Invalid(fmt.Errorf("unsupported address family %q", family))
 	}
 	if !strings.HasPrefix(value, "v6-") {
-		return netip.Addr{}, fmt.Errorf("IPv6 values must use the v6- prefix")
+		return netip.Addr{}, Invalid(fmt.Errorf("IPv6 values must use the v6- prefix"))
 	}
 	decoded := strings.ReplaceAll(strings.TrimPrefix(value, "v6-"), "-", ":")
 	address, err := netip.ParseAddr(decoded)
 	if err != nil {
-		return netip.Addr{}, err
+		return netip.Addr{}, Invalid(err)
 	}
 	if !address.Is6() || address.Is4In6() {
-		return netip.Addr{}, fmt.Errorf("address is not ipv6")
+		return netip.Addr{}, Invalid(fmt.Errorf("address is not ipv6"))
 	}
 	canonical := "v6-" + strings.ReplaceAll(address.String(), ":", "-")
 	if value != canonical {
-		return netip.Addr{}, fmt.Errorf("IPv6 value is not canonical; use %q", canonical)
+		return netip.Addr{}, Invalid(fmt.Errorf("IPv6 value is not canonical; use %q", canonical))
 	}
 	return address, nil
 }

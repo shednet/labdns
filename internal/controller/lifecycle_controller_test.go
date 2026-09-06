@@ -67,88 +67,109 @@ func lifecycleScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-func TestLifecycleReconcilerMissingSourceSchedulesAndRequeues(t *testing.T) {
-	ctx := context.Background()
-	identity := source.Identity{APIVersion: networkingv1.SchemeGroupVersion.String(), Kind: "Ingress", Namespace: "app", Name: "web", UID: types.UID("old")}
-	kubeClient := fake.NewClientBuilder().WithScheme(lifecycleScheme(t)).Build()
-	clock := lifecycleClock{now: time.Date(2026, 8, 30, 20, 0, 0, 0, time.UTC)}
-	output := &dnsendpoint.Writer{Client: kubeClient, Clock: clock}
-	publication := source.Publication{ProviderName: "www", DeletionDelay: time.Minute, Records: []source.Record{{DNSName: "app.example.com", RecordType: "A", Targets: []string{"192.0.2.1"}, TTL: 300}}}
-	if err := output.Apply(ctx, identity, []source.Publication{publication}); err != nil {
-		t.Fatal(err)
-	}
-	key := client.ObjectKey{Namespace: "app", Name: dnsendpoint.ObjectName(identity, "www")}
-	result, err := (&LifecycleReconciler{Client: kubeClient, Output: output}).Reconcile(ctx, reconcile.Request{NamespacedName: key})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.RequeueAfter != time.Minute {
-		t.Fatalf("requeue=%s", result.RequeueAfter)
-	}
-	var object externaldnsv1alpha1.DNSEndpoint
-	if err := kubeClient.Get(ctx, key, &object); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(object.Annotations[dnsendpoint.LifecycleAnnotation], `"target":"192.0.2.1"`) {
-		t.Fatalf("lifecycle=%s", object.Annotations[dnsendpoint.LifecycleAnnotation])
-	}
-}
-
-func TestLifecycleReconcilerGatewayDisabledRetiresWithoutGatewayRead(t *testing.T) {
-	ctx := context.Background()
-	identity := source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: "HTTPRoute", Namespace: "app", Name: "route", UID: types.UID("route-uid")}
-	base := fake.NewClientBuilder().WithScheme(lifecycleScheme(t)).Build()
-	kubeClient := &noGatewayReadClient{Client: base}
-	clock := lifecycleClock{now: time.Date(2026, 8, 30, 20, 0, 0, 0, time.UTC)}
-	output := &dnsendpoint.Writer{Client: kubeClient, Clock: clock}
-	publication := source.Publication{ProviderName: "www", DeletionDelay: time.Minute, Records: []source.Record{{DNSName: "app.example.com", RecordType: "A", Targets: []string{"192.0.2.1"}, TTL: 300}}}
-	if err := output.Apply(ctx, identity, []source.Publication{publication}); err != nil {
-		t.Fatal(err)
-	}
-	key := client.ObjectKey{Namespace: "app", Name: dnsendpoint.ObjectName(identity, "www")}
-	result, err := (&LifecycleReconciler{Client: kubeClient, Output: output, GatewayEnabled: false}).Reconcile(ctx, reconcile.Request{NamespacedName: key})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if kubeClient.reads != 0 {
-		t.Fatalf("Gateway API reads=%d", kubeClient.reads)
-	}
-	if result.RequeueAfter != time.Minute {
-		t.Fatalf("requeue=%s", result.RequeueAfter)
-	}
-	var object externaldnsv1alpha1.DNSEndpoint
-	if err := kubeClient.Get(ctx, key, &object); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(object.Annotations[dnsendpoint.LifecycleAnnotation], `"target":"192.0.2.1"`) {
-		t.Fatalf("HTTPRoute output was not retired: %s", object.Annotations[dnsendpoint.LifecycleAnnotation])
-	}
-}
-
-func TestLifecycleReconcilerGatewayEnabledVerifiesHTTPRouteUID(t *testing.T) {
-	ctx := context.Background()
-	identity := source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: "HTTPRoute", Namespace: "app", Name: "route", UID: types.UID("route-uid")}
-	route := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: identity.Name, Namespace: identity.Namespace, UID: identity.UID}}
-	kubeClient := fake.NewClientBuilder().WithScheme(lifecycleScheme(t)).WithObjects(route).Build()
+func seedLifecyclePublication(t *testing.T, kubeClient client.Client, identity source.Identity) (*dnsendpoint.Writer, client.ObjectKey) {
+	t.Helper()
 	output := &dnsendpoint.Writer{Client: kubeClient, Clock: lifecycleClock{now: time.Date(2026, 8, 30, 20, 0, 0, 0, time.UTC)}}
 	publication := source.Publication{ProviderName: "www", DeletionDelay: time.Minute, Records: []source.Record{{DNSName: "app.example.com", RecordType: "A", Targets: []string{"192.0.2.1"}, TTL: 300}}}
-	if err := output.Apply(ctx, identity, []source.Publication{publication}); err != nil {
+	if err := output.Apply(context.Background(), identity, []source.Publication{publication}); err != nil {
 		t.Fatal(err)
 	}
-	key := client.ObjectKey{Namespace: "app", Name: dnsendpoint.ObjectName(identity, "www")}
-	result, err := (&LifecycleReconciler{Client: kubeClient, Output: output, GatewayEnabled: true}).Reconcile(ctx, reconcile.Request{NamespacedName: key})
-	if err != nil {
-		t.Fatal(err)
+	return output, client.ObjectKey{Namespace: identity.Namespace, Name: dnsendpoint.ObjectName(identity, "www")}
+}
+
+func lifecycleEndpoint(identity source.Identity, deletionDelay, lifecycle string) *externaldnsv1alpha1.DNSEndpoint {
+	annotations := map[string]string{
+		dnsendpoint.SourceKindAnnotation:      string(identity.Kind),
+		dnsendpoint.SourceNamespaceAnnotation: identity.Namespace,
+		dnsendpoint.SourceNameAnnotation:      identity.Name,
+		dnsendpoint.DeletionDelayAnnotation:   deletionDelay,
+		dnsendpoint.LifecycleAnnotation:       lifecycle,
 	}
-	if result.RequeueAfter != 0 {
-		t.Fatalf("unexpected requeue=%s", result.RequeueAfter)
+	if identity.UID != "" {
+		annotations[dnsendpoint.SourceUIDAnnotation] = string(identity.UID)
 	}
-	var object externaldnsv1alpha1.DNSEndpoint
-	if err := kubeClient.Get(ctx, key, &object); err != nil {
-		t.Fatal(err)
+	return &externaldnsv1alpha1.DNSEndpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dnsendpoint.ObjectName(identity, "www"),
+			Namespace: identity.Namespace,
+			Labels: map[string]string{
+				dnsendpoint.ManagedByLabel: dnsendpoint.ManagedByValue,
+				dnsendpoint.ProviderLabel:  "www",
+				dnsendpoint.SourceKeyLabel: dnsendpoint.SourceKey(identity),
+			},
+			Annotations: annotations,
+		},
+		Spec: externaldnsv1alpha1.DNSEndpointSpec{Endpoints: []*endpoint.Endpoint{{
+			DNSName: "app.example.com", RecordType: "A", Targets: []string{"192.0.2.1"},
+		}}},
 	}
-	if strings.Contains(object.Annotations[dnsendpoint.LifecycleAnnotation], `"target"`) {
-		t.Fatal("live HTTPRoute was retired with Gateway enabled")
+}
+
+func TestLifecycleReconcilerRetirementModes(t *testing.T) {
+	tests := []struct {
+		name              string
+		identity          source.Identity
+		sourceObject      client.Object
+		gatewayEnabled    bool
+		forbidGatewayRead bool
+		wantGatewayReads  int
+		wantRetired       bool
+		wantRequeueAfter  time.Duration
+	}{
+		{
+			name:             "missing ingress",
+			identity:         source.Identity{APIVersion: networkingv1.SchemeGroupVersion.String(), Kind: "Ingress", Namespace: "app", Name: "web", UID: types.UID("old")},
+			wantRetired:      true,
+			wantRequeueAfter: time.Minute,
+		},
+		{
+			name:              "gateway disabled HTTPRoute",
+			identity:          source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: "HTTPRoute", Namespace: "app", Name: "route", UID: types.UID("route-uid")},
+			forbidGatewayRead: true,
+			wantRetired:       true,
+			wantRequeueAfter:  time.Minute,
+		},
+		{
+			name:           "gateway enabled live HTTPRoute",
+			identity:       source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: "HTTPRoute", Namespace: "app", Name: "route", UID: types.UID("route-uid")},
+			sourceObject:   &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "app", UID: types.UID("route-uid")}},
+			gatewayEnabled: true,
+			wantRetired:    false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			objects := []client.Object{}
+			if tc.sourceObject != nil {
+				objects = append(objects, tc.sourceObject)
+			}
+			base := fake.NewClientBuilder().WithScheme(lifecycleScheme(t)).WithObjects(objects...).Build()
+			var kubeClient client.Client = base
+			var gatewayReader *noGatewayReadClient
+			if tc.forbidGatewayRead {
+				gatewayReader = &noGatewayReadClient{Client: base}
+				kubeClient = gatewayReader
+			}
+			output, key := seedLifecyclePublication(t, kubeClient, tc.identity)
+			result, err := (&lifecycleReconciler{Client: kubeClient, Output: output, GatewayEnabled: tc.gatewayEnabled}).Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gatewayReader != nil && gatewayReader.reads != tc.wantGatewayReads {
+				t.Fatalf("Gateway API reads=%d, want %d", gatewayReader.reads, tc.wantGatewayReads)
+			}
+			if result.RequeueAfter != tc.wantRequeueAfter {
+				t.Fatalf("requeue=%s, want %s", result.RequeueAfter, tc.wantRequeueAfter)
+			}
+			var object externaldnsv1alpha1.DNSEndpoint
+			if err := kubeClient.Get(context.Background(), key, &object); err != nil {
+				t.Fatal(err)
+			}
+			retired := strings.Contains(object.Annotations[dnsendpoint.LifecycleAnnotation], `"target":"192.0.2.1"`)
+			if retired != tc.wantRetired {
+				t.Fatalf("retired=%t, lifecycle=%s, want %t", retired, object.Annotations[dnsendpoint.LifecycleAnnotation], tc.wantRetired)
+			}
+		})
 	}
 }
 
@@ -157,17 +178,12 @@ func TestLifecycleReconcilerUIDMismatchWaitsForSourceController(t *testing.T) {
 	identity := source.Identity{APIVersion: networkingv1.SchemeGroupVersion.String(), Kind: "Ingress", Namespace: "app", Name: "web", UID: types.UID("old")}
 	sourceObject := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "app", UID: types.UID("new")}}
 	kubeClient := fake.NewClientBuilder().WithScheme(lifecycleScheme(t)).WithObjects(sourceObject).Build()
-	output := &dnsendpoint.Writer{Client: kubeClient, Clock: lifecycleClock{now: time.Now()}}
-	publication := source.Publication{ProviderName: "www", DeletionDelay: time.Minute, Records: []source.Record{{DNSName: "app.example.com", RecordType: "A", Targets: []string{"192.0.2.1"}, TTL: 300}}}
-	if err := output.Apply(ctx, identity, []source.Publication{publication}); err != nil {
-		t.Fatal(err)
-	}
-	key := client.ObjectKey{Namespace: "app", Name: dnsendpoint.ObjectName(identity, "www")}
+	output, key := seedLifecyclePublication(t, kubeClient, identity)
 	var before externaldnsv1alpha1.DNSEndpoint
 	if err := kubeClient.Get(ctx, key, &before); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (&LifecycleReconciler{Client: kubeClient, Output: output}).Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
+	if _, err := (&lifecycleReconciler{Client: kubeClient, Output: output}).Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
 		t.Fatal(err)
 	}
 	var after externaldnsv1alpha1.DNSEndpoint
@@ -187,9 +203,12 @@ func TestLifecycleReconcilerMalformedStateEmitsWarningAndFailsClosed(t *testing.
 	kubeClient := fake.NewClientBuilder().WithScheme(lifecycleScheme(t)).WithObjects(sourceObject, object).Build()
 	recorder := events.NewFakeRecorder(1)
 	output := &dnsendpoint.Writer{Client: kubeClient, Clock: lifecycleClock{now: time.Now()}}
-	_, err := (&LifecycleReconciler{Client: kubeClient, Output: output, Recorder: recorder}).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(object)})
+	_, err := (&lifecycleReconciler{Client: kubeClient, Output: output, Recorder: recorder}).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(object)})
 	if err == nil {
 		t.Fatal("malformed lifecycle accepted")
+	}
+	if !errors.Is(err, reconcile.TerminalError(nil)) {
+		t.Fatalf("error = %v, want terminal error", err)
 	}
 	select {
 	case event := <-recorder.Events:
@@ -208,6 +227,31 @@ func TestLifecycleReconcilerMalformedStateEmitsWarningAndFailsClosed(t *testing.
 	}
 }
 
+func TestLifecycleReconcilerInvalidWriterStateIsTerminal(t *testing.T) {
+	identity := source.Identity{APIVersion: networkingv1.SchemeGroupVersion.String(), Kind: "Ingress", Namespace: "app", Name: "web", UID: types.UID("uid")}
+	for name, annotations := range map[string]map[string]string{
+		"invalid deletion delay": {
+			dnsendpoint.DeletionDelayAnnotation: "bad",
+			dnsendpoint.LifecycleAnnotation:     `{"version":1,"pending":[]}`,
+		},
+		"pending target absent from spec": {
+			dnsendpoint.DeletionDelayAnnotation: "1m0s",
+			dnsendpoint.LifecycleAnnotation:     `{"version":1,"pending":[{"dnsName":"app.example.com","recordType":"A","target":"192.0.2.2","deadline":"2099-01-01T00:00:00Z"}]}`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sourceObject := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: identity.Name, Namespace: identity.Namespace, UID: identity.UID}}
+			object := lifecycleEndpoint(identity, annotations[dnsendpoint.DeletionDelayAnnotation], annotations[dnsendpoint.LifecycleAnnotation])
+			kubeClient := fake.NewClientBuilder().WithScheme(lifecycleScheme(t)).WithObjects(sourceObject, object).Build()
+			output := &dnsendpoint.Writer{Client: kubeClient, Clock: lifecycleClock{now: time.Now()}}
+			_, err := (&lifecycleReconciler{Client: kubeClient, Output: output}).Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(object)})
+			if !errors.Is(err, reconcile.TerminalError(nil)) {
+				t.Fatalf("error = %v, want terminal error", err)
+			}
+		})
+	}
+}
+
 func TestLifecycleReconcilerMissingSourceUIDWarnsAndFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	identity := source.Identity{APIVersion: networkingv1.SchemeGroupVersion.String(), Kind: "Ingress", Namespace: "app", Name: "web"}
@@ -216,9 +260,12 @@ func TestLifecycleReconcilerMissingSourceUIDWarnsAndFailsClosed(t *testing.T) {
 	kubeClient := fake.NewClientBuilder().WithScheme(lifecycleScheme(t)).WithObjects(sourceObject, object).Build()
 	recorder := events.NewFakeRecorder(1)
 	output := &dnsendpoint.Writer{Client: kubeClient, Clock: lifecycleClock{now: time.Now()}}
-	_, err := (&LifecycleReconciler{Client: kubeClient, Output: output, Recorder: recorder}).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(object)})
+	_, err := (&lifecycleReconciler{Client: kubeClient, Output: output, Recorder: recorder}).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(object)})
 	if err == nil {
 		t.Fatal("missing source UID accepted")
+	}
+	if !errors.Is(err, reconcile.TerminalError(nil)) {
+		t.Fatalf("error = %v, want terminal error", err)
 	}
 	select {
 	case event := <-recorder.Events:

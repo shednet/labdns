@@ -29,19 +29,19 @@ func NormalizeHostname(value string) (string, error) {
 	if remainder, wildcard := strings.CutPrefix(value, "*."); wildcard {
 		check = remainder
 		if strings.Contains(check, "*") {
-			return "", fmt.Errorf("wildcard is permitted only as the complete first label")
+			return "", Invalid(fmt.Errorf("wildcard is permitted only as the complete first label"))
 		}
 	} else if strings.Contains(value, "*") {
-		return "", fmt.Errorf("wildcard is permitted only as the complete first label")
+		return "", Invalid(fmt.Errorf("wildcard is permitted only as the complete first label"))
 	}
 	if errs := validation.IsDNS1123Subdomain(check); len(errs) != 0 {
-		return "", fmt.Errorf("not a DNS hostname: %s", strings.Join(errs, ", "))
+		return "", Invalid(fmt.Errorf("not a DNS hostname: %s", strings.Join(errs, ", ")))
 	}
 	return value, nil
 }
 
-// MatchingZone returns the longest label-boundary suffix, or an empty string.
-func MatchingZone(hostname string, zones []string) string {
+// matchingZone returns the longest label-boundary suffix, or an empty string.
+func matchingZone(hostname string, zones []string) string {
 	hostname = strings.TrimPrefix(strings.ToLower(strings.TrimSuffix(hostname, ".")), "*.")
 	best := ""
 	for _, zone := range zones {

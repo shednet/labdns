@@ -39,8 +39,8 @@ const (
 	DeletionDelayAnnotation = AnnotationPrefix + "deletion-delay"
 )
 
-// RelevantAnnotations returns only annotations labdns is allowed to inherit.
-func RelevantAnnotations(in map[string]string) map[string]string {
+// relevantAnnotations returns only annotations labdns is allowed to inherit.
+func relevantAnnotations(in map[string]string) map[string]string {
 	out := map[string]string{}
 	for key, value := range in {
 		if strings.HasPrefix(key, AnnotationPrefix) || strings.HasPrefix(key, ExternalDNSPrefix) {
@@ -55,7 +55,7 @@ func RelevantAnnotations(in map[string]string) map[string]string {
 func MergeAnnotations(levels ...map[string]string) map[string]string {
 	out := map[string]string{}
 	for _, level := range levels {
-		maps.Copy(out, RelevantAnnotations(level))
+		maps.Copy(out, relevantAnnotations(level))
 	}
 	return out
 }
@@ -78,11 +78,11 @@ const (
 )
 
 func ParseAnnotations(values map[string]string) (ParsedAnnotations, error) {
-	result := ParsedAnnotations{Resolved: RelevantAnnotations(values)}
+	result := ParsedAnnotations{Resolved: relevantAnnotations(values)}
 	if value, ok := values[EnabledAnnotation]; ok {
 		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
 		if err != nil {
-			return result, fmt.Errorf("invalid %s: %w", EnabledAnnotation, err)
+			return result, Invalid(fmt.Errorf("invalid %s: %w", EnabledAnnotation, err))
 		}
 		result.Enabled = parsed
 	}
@@ -90,10 +90,10 @@ func ParseAnnotations(values map[string]string) (ParsedAnnotations, error) {
 		result.Providers = commaList(value)
 		for _, name := range result.Providers {
 			if len(name) > 63 {
-				return result, fmt.Errorf("invalid provider %q: must be at most 63 characters", name)
+				return result, Invalid(fmt.Errorf("invalid provider %q: must be at most 63 characters", name))
 			}
 			if errs := validation.IsDNS1123Subdomain(name); len(errs) != 0 {
-				return result, fmt.Errorf("invalid provider %q: %s", name, strings.Join(errs, ", "))
+				return result, Invalid(fmt.Errorf("invalid provider %q: %s", name, strings.Join(errs, ", ")))
 			}
 		}
 	}
@@ -101,7 +101,7 @@ func ParseAnnotations(values map[string]string) (ParsedAnnotations, error) {
 		for _, hostname := range commaList(value) {
 			normalized, err := NormalizeHostname(hostname)
 			if err != nil {
-				return result, fmt.Errorf("invalid hostname override %q: %w", hostname, err)
+				return result, Invalid(fmt.Errorf("invalid hostname override %q: %w", hostname, err))
 			}
 			result.Hostnames = append(result.Hostnames, normalized)
 		}
@@ -110,14 +110,14 @@ func ParseAnnotations(values map[string]string) (ParsedAnnotations, error) {
 	if value, ok := values[TTLAnnotation]; ok {
 		ttl, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
 		if err != nil || ttl < 1 || ttl > 2147483647 {
-			return result, fmt.Errorf("invalid %s %q: must be an integer in 1..2147483647", TTLAnnotation, value)
+			return result, Invalid(fmt.Errorf("invalid %s %q: must be an integer in 1..2147483647", TTLAnnotation, value))
 		}
 		result.TTL = &ttl
 	}
 	if value, ok := values[DeletionDelayAnnotation]; ok {
 		delay, err := time.ParseDuration(strings.TrimSpace(value))
 		if err != nil || delay < 0 {
-			return result, fmt.Errorf("invalid %s %q: must be a non-negative Go duration", DeletionDelayAnnotation, value)
+			return result, Invalid(fmt.Errorf("invalid %s %q: must be a non-negative Go duration", DeletionDelayAnnotation, value))
 		}
 		result.DeletionDelay = &delay
 	}
@@ -129,7 +129,7 @@ func ParseAnnotations(values map[string]string) (ParsedAnnotations, error) {
 			case string(IPv6):
 				result.Families = append(result.Families, IPv6)
 			default:
-				return result, fmt.Errorf("invalid address family %q", family)
+				return result, Invalid(fmt.Errorf("invalid address family %q", family))
 			}
 		}
 		result.Families = uniqueFamilies(result.Families)

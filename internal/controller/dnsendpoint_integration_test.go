@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -36,16 +35,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	controllerconfig "sigs.k8s.io/controller-runtime/pkg/config"
-	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	externaldnsv1alpha1 "sigs.k8s.io/external-dns/apis/v1alpha1"
 	"sigs.k8s.io/external-dns/endpoint"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	labdnsv1alpha1 "github.com/shednet/labdns/api/v1alpha1"
 	"github.com/shednet/labdns/internal/dnsendpoint"
@@ -61,29 +58,9 @@ type apiMutationClient struct {
 }
 
 func TestManagerRestartReconstructsMetricsFromInitialWatches(t *testing.T) {
-	environment := &envtest.Environment{CRDDirectoryPaths: []string{
-		filepath.Join("..", "..", "config", "crd", "bases"),
-		filepath.Join("..", "..", "test", "fixtures", "external-dns-v0.21.0"),
-	}, ErrorIfCRDPathMissing: true}
-	config, err := environment.Start()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := environment.Stop(); err != nil {
-			t.Errorf("stop envtest: %v", err)
-		}
-	}()
-	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, labdnsv1alpha1.AddToScheme, externaldnsv1alpha1.AddToScheme} {
-		if err := add(scheme); err != nil {
-			t.Fatal(err)
-		}
-	}
-	direct, err := client.New(config, client.Options{Scheme: scheme})
-	if err != nil {
-		t.Fatal(err)
-	}
+	config, scheme, direct := sharedIntegration(t)
+	t.Cleanup(func() { cleanupSharedClusterObjects(t, []string{"restart-www"}, nil, nil) })
+	t.Cleanup(func() { cleanupSharedNamespaces(t, "metrics-restart") })
 	ctx := context.Background()
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "metrics-restart"}}
 	provider := &labdnsv1alpha1.DNSProvider{ObjectMeta: metav1.ObjectMeta{Name: "restart-www"}, Spec: labdnsv1alpha1.DNSProviderSpec{
@@ -117,7 +94,7 @@ func TestManagerRestartReconstructsMetricsFromInitialWatches(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := func() (*Metrics, context.CancelFunc, <-chan error) {
+	start := func() (*Metrics, func()) {
 		registry := prometheus.NewRegistry()
 		metrics := NewMetrics(registry)
 		mgr, err := ctrl.NewManager(config, ctrl.Options{Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0", Controller: controllerconfig.Controller{SkipNameValidation: new(true)}})
@@ -131,12 +108,7 @@ func TestManagerRestartReconstructsMetricsFromInitialWatches(t *testing.T) {
 		if err := SetupLifecycle(mgr, output, false, metrics); err != nil {
 			t.Fatal(err)
 		}
-		managerContext, cancel := context.WithCancel(ctx)
-		done := make(chan error, 1)
-		go func() { done <- mgr.Start(managerContext) }()
-		if !mgr.GetCache().WaitForCacheSync(managerContext) {
-			t.Fatal("cache did not synchronize")
-		}
+		stop := startManagedTestManager(t, mgr, ctx)
 		pollContext, pollCancel := context.WithTimeout(ctx, 10*time.Second)
 		defer pollCancel()
 		if err := wait.PollUntilContextTimeout(pollContext, 20*time.Millisecond, 10*time.Second, true, func(context.Context) (bool, error) {
@@ -145,21 +117,10 @@ func TestManagerRestartReconstructsMetricsFromInitialWatches(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("initial watches did not reconstruct exact metrics: %v", err)
 		}
-		return metrics, cancel, done
-	}
-	stop := func(cancel context.CancelFunc, done <-chan error) {
-		cancel()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatalf("manager stopped: %v", err)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("manager did not stop")
-		}
+		return metrics, stop
 	}
 
-	first, cancel, done := start()
+	first, stop := start()
 	assertGauge(t, first.source.WithLabelValues("Ingress"), 1)
 	assertGauge(t, first.generated, 1)
 	assertGauge(t, first.pending, 1)
@@ -171,10 +132,9 @@ func TestManagerRestartReconstructsMetricsFromInitialWatches(t *testing.T) {
 	if err := direct.Get(ctx, client.ObjectKeyFromObject(dnsObject), &beforeEndpoint); err != nil {
 		t.Fatal(err)
 	}
-	stop(cancel, done)
+	stop()
 
-	second, cancel, done := start()
-	defer stop(cancel, done)
+	second, _ := start()
 	assertGauge(t, second.source.WithLabelValues("Ingress"), 1)
 	assertGauge(t, second.generated, 1)
 	assertGauge(t, second.pending, 1)
@@ -228,69 +188,33 @@ func (c *apiMutationClient) Delete(ctx context.Context, object client.Object, op
 	return c.Client.Delete(ctx, object, options...)
 }
 
-func TestManagerDNSEndpointIsolationAndRestartRecovery(t *testing.T) { //nolint:gocyclo
-	const trueValue = "true"
-	environment := &envtest.Environment{CRDDirectoryPaths: []string{
-		filepath.Join("..", "..", "config", "crd", "bases"),
-		filepath.Join("..", "..", "test", "fixtures", "external-dns-v0.21.0"),
-		gatewayAPICRDPath(t),
-	}, ErrorIfCRDPathMissing: true}
-	config, err := environment.Start()
+type dnsEndpointIsolationFixture struct {
+	namespace  *corev1.Namespace
+	vpn        *labdnsv1alpha1.DNSProvider
+	node       *corev1.Node
+	ingress    *networkingv1.Ingress
+	identity   source.Identity
+	cloudflare string
+}
+
+func startDNSEndpointManager(t *testing.T, config *rest.Config, scheme *runtime.Scheme) func() {
+	t.Helper()
+	mgr, err := ctrl.NewManager(config, ctrl.Options{Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0", Controller: controllerconfig.Controller{SkipNameValidation: new(true)}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		if err := environment.Stop(); err != nil {
-			t.Errorf("stop envtest: %v", err)
-		}
-	}()
-	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, labdnsv1alpha1.AddToScheme, externaldnsv1alpha1.AddToScheme, gatewayv1.Install, gatewayv1beta1.Install} {
-		if err := add(scheme); err != nil {
-			t.Fatal(err)
-		}
-	}
-	direct, err := client.New(config, client.Options{Scheme: scheme})
-	if err != nil {
+	output := dnsendpoint.NewWriter(mgr.GetClient())
+	if err := Setup(context.Background(), mgr, output, false, nil); err != nil {
 		t.Fatal(err)
 	}
-	startManager := func() (context.CancelFunc, <-chan error) {
-		mgr, err := ctrl.NewManager(config, ctrl.Options{Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0", Controller: controllerconfig.Controller{SkipNameValidation: new(true)}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		output := dnsendpoint.NewWriter(mgr.GetClient())
-		if err := Setup(context.Background(), mgr, output, false); err != nil {
-			t.Fatal(err)
-		}
-		if err := SetupLifecycle(mgr, output, false); err != nil {
-			t.Fatal(err)
-		}
-		ctx, cancel := context.WithCancel(context.Background())
-		done := make(chan error, 1)
-		go func() { done <- mgr.Start(ctx) }()
-		if !mgr.GetCache().WaitForCacheSync(ctx) {
-			t.Fatal("cache did not synchronize")
-		}
-		return cancel, done
+	if err := SetupLifecycle(mgr, output, false, nil); err != nil {
+		t.Fatal(err)
 	}
-	cancel, done := startManager()
-	stop := func() {
-		cancel()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatalf("manager stopped: %v", err)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("manager did not stop")
-		}
-	}
-	defer func() {
-		if cancel != nil {
-			stop()
-		}
-	}()
+	return startManagedTestManager(t, mgr, context.Background())
+}
+
+func createDNSEndpointIsolationFixture(t *testing.T, direct client.Client) dnsEndpointIsolationFixture {
+	t.Helper()
 	ctx := context.Background()
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "dnsendpoint"}}
 	if err := direct.Create(ctx, namespace); err != nil {
@@ -319,127 +243,170 @@ func TestManagerDNSEndpointIsolationAndRestartRecovery(t *testing.T) { //nolint:
 	if err := direct.Create(ctx, slice); err != nil {
 		t.Fatal(err)
 	}
-	ingress := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: namespace.Name, Annotations: map[string]string{source.EnabledAnnotation: trueValue, source.ProvidersAnnotation: "www,vpn", cloudflare: trueValue}}, Spec: networkingv1.IngressSpec{Rules: []networkingv1.IngressRule{ingressRule("same.example.com", "api")}}}
+	ingress := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: namespace.Name, Annotations: map[string]string{source.EnabledAnnotation: "true", source.ProvidersAnnotation: "www,vpn", cloudflare: "true"}}, Spec: networkingv1.IngressSpec{Rules: []networkingv1.IngressRule{ingressRule("same.example.com", "api")}}}
 	if err := direct.Create(ctx, ingress); err != nil {
 		t.Fatal(err)
 	}
-	identity := source.Identity{APIVersion: networkingv1.SchemeGroupVersion.String(), Kind: "Ingress", Namespace: namespace.Name, Name: ingress.Name}
-	waitObject := func(provider string, predicate func(*externaldnsv1alpha1.DNSEndpoint) bool) *externaldnsv1alpha1.DNSEndpoint {
-		t.Helper()
-		key := client.ObjectKey{Namespace: namespace.Name, Name: dnsendpoint.ObjectName(identity, provider)}
-		deadline := time.Now().Add(10 * time.Second)
-		for time.Now().Before(deadline) {
-			var object externaldnsv1alpha1.DNSEndpoint
-			if err := direct.Get(ctx, key, &object); err == nil && predicate(&object) {
-				return &object
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		t.Fatalf("timed out waiting for provider %s", provider)
-		return nil
+	return dnsEndpointIsolationFixture{
+		namespace:  namespace,
+		vpn:        providers[1],
+		node:       node,
+		ingress:    ingress,
+		identity:   source.Identity{APIVersion: networkingv1.SchemeGroupVersion.String(), Kind: "Ingress", Namespace: namespace.Name, Name: ingress.Name},
+		cloudflare: cloudflare,
 	}
-	www := waitObject("www", func(object *externaldnsv1alpha1.DNSEndpoint) bool { return endpointTargetsEqual(object, "192.0.2.1") })
-	vpn := waitObject("vpn", func(object *externaldnsv1alpha1.DNSEndpoint) bool { return endpointTargetsEqual(object, "10.0.0.1") })
-	if www.Annotations[cloudflare] != trueValue || len(www.Spec.Endpoints[0].ProviderSpecific) != 1 || www.Spec.Endpoints[0].ProviderSpecific[0].Value != trueValue {
+}
+
+func waitForDNSEndpoint(t *testing.T, ctx context.Context, direct client.Client, namespace string, identity source.Identity, provider string, predicate func(*externaldnsv1alpha1.DNSEndpoint) bool) *externaldnsv1alpha1.DNSEndpoint {
+	t.Helper()
+	key := client.ObjectKey{Namespace: namespace, Name: dnsendpoint.ObjectName(identity, provider)}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var object externaldnsv1alpha1.DNSEndpoint
+		if err := direct.Get(ctx, key, &object); err == nil && predicate(&object) {
+			return &object
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for provider %s", provider)
+	return nil
+}
+
+func waitForDNSEndpointDeletion(t *testing.T, ctx context.Context, direct client.Client, namespace string, identity source.Identity, provider string) {
+	t.Helper()
+	key := client.ObjectKey{Namespace: namespace, Name: dnsendpoint.ObjectName(identity, provider)}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var object externaldnsv1alpha1.DNSEndpoint
+		if err := direct.Get(ctx, key, &object); apierrors.IsNotFound(err) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	var object externaldnsv1alpha1.DNSEndpoint
+	err := direct.Get(ctx, key, &object)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("provider %s remained after recovered deadline: %v", provider, err)
+	}
+}
+
+func assertDNSEndpointProviderIsolation(t *testing.T, www, vpn *externaldnsv1alpha1.DNSEndpoint, cloudflare string) {
+	t.Helper()
+	if www.Annotations[cloudflare] != "true" || len(www.Spec.Endpoints[0].ProviderSpecific) != 1 || www.Spec.Endpoints[0].ProviderSpecific[0].Value != "true" {
 		t.Fatal("www provider pass-through missing")
 	}
-	if vpn.Annotations[cloudflare] != trueValue || len(vpn.Spec.Endpoints[0].ProviderSpecific) != 0 {
+	if vpn.Annotations[cloudflare] != "true" || len(vpn.Spec.Endpoints[0].ProviderSpecific) != 0 {
 		t.Fatal("resolved metadata must pass through while provider behavior remains isolated")
 	}
-	// Deleting a selected profile is authoritative removal, not a transient empty read.
-	if err := direct.Delete(ctx, providers[1]); err != nil {
+}
+
+func exerciseProviderDeletionAndRecreation(t *testing.T, ctx context.Context, direct client.Client, fixture dnsEndpointIsolationFixture) {
+	t.Helper()
+	if err := direct.Delete(ctx, fixture.vpn); err != nil {
 		t.Fatal(err)
 	}
-	waitObject("vpn", func(object *externaldnsv1alpha1.DNSEndpoint) bool {
+	waitForDNSEndpoint(t, ctx, direct, fixture.namespace.Name, fixture.identity, "vpn", func(object *externaldnsv1alpha1.DNSEndpoint) bool {
 		return strings.Contains(object.Annotations[dnsendpoint.LifecycleAnnotation], `"target":"10.0.0.1"`)
 	})
-	recreatedVPN := &labdnsv1alpha1.DNSProvider{ObjectMeta: metav1.ObjectMeta{Name: "vpn"}, Spec: providers[1].Spec}
+	recreatedVPN := &labdnsv1alpha1.DNSProvider{ObjectMeta: metav1.ObjectMeta{Name: "vpn"}, Spec: fixture.vpn.Spec}
 	if err := direct.Create(ctx, recreatedVPN); err != nil {
 		t.Fatal(err)
 	}
-	waitObject("vpn", func(object *externaldnsv1alpha1.DNSEndpoint) bool {
+	waitForDNSEndpoint(t, ctx, direct, fixture.namespace.Name, fixture.identity, "vpn", func(object *externaldnsv1alpha1.DNSEndpoint) bool {
 		return endpointTargetsEqual(object, "10.0.0.1") && !strings.Contains(object.Annotations[dnsendpoint.LifecycleAnnotation], `"target"`)
 	})
-	// Explicit source disablement schedules every selected provider and re-enable cancels it.
-	if err := direct.Get(ctx, client.ObjectKeyFromObject(ingress), ingress); err != nil {
+}
+
+func exerciseSourceDisablementAndReenable(t *testing.T, ctx context.Context, direct client.Client, fixture dnsEndpointIsolationFixture) {
+	t.Helper()
+	if err := direct.Get(ctx, client.ObjectKeyFromObject(fixture.ingress), fixture.ingress); err != nil {
 		t.Fatal(err)
 	}
-	ingress.Annotations[source.EnabledAnnotation] = "false"
-	if err := direct.Update(ctx, ingress); err != nil {
+	fixture.ingress.Annotations[source.EnabledAnnotation] = "false"
+	if err := direct.Update(ctx, fixture.ingress); err != nil {
 		t.Fatal(err)
 	}
 	for _, provider := range []string{"www", "vpn"} {
-		waitObject(provider, func(object *externaldnsv1alpha1.DNSEndpoint) bool {
+		waitForDNSEndpoint(t, ctx, direct, fixture.namespace.Name, fixture.identity, provider, func(object *externaldnsv1alpha1.DNSEndpoint) bool {
 			return strings.Contains(object.Annotations[dnsendpoint.LifecycleAnnotation], `"target"`)
 		})
 	}
-	if err := direct.Get(ctx, client.ObjectKeyFromObject(ingress), ingress); err != nil {
+	if err := direct.Get(ctx, client.ObjectKeyFromObject(fixture.ingress), fixture.ingress); err != nil {
 		t.Fatal(err)
 	}
-	ingress.Annotations[source.EnabledAnnotation] = trueValue
-	if err := direct.Update(ctx, ingress); err != nil {
+	fixture.ingress.Annotations[source.EnabledAnnotation] = "true"
+	if err := direct.Update(ctx, fixture.ingress); err != nil {
 		t.Fatal(err)
 	}
 	for _, provider := range []string{"www", "vpn"} {
-		waitObject(provider, func(object *externaldnsv1alpha1.DNSEndpoint) bool {
+		waitForDNSEndpoint(t, ctx, direct, fixture.namespace.Name, fixture.identity, provider, func(object *externaldnsv1alpha1.DNSEndpoint) bool {
 			return !strings.Contains(object.Annotations[dnsendpoint.LifecycleAnnotation], `"target"`)
 		})
 	}
-	// A Node-only label update must trigger rotation; the old target is retained pending.
-	if err := direct.Get(ctx, client.ObjectKey{Name: node.Name}, node); err != nil {
+}
+
+func exerciseNodeTargetRotation(t *testing.T, ctx context.Context, direct client.Client, fixture dnsEndpointIsolationFixture) {
+	t.Helper()
+	if err := direct.Get(ctx, client.ObjectKey{Name: fixture.node.Name}, fixture.node); err != nil {
 		t.Fatal(err)
 	}
-	node.Labels["network.example/public"] = "192.0.2.2"
-	if err := direct.Update(ctx, node); err != nil {
+	fixture.node.Labels["network.example/public"] = "192.0.2.2"
+	if err := direct.Update(ctx, fixture.node); err != nil {
 		t.Fatal(err)
 	}
-	waitObject("www", func(object *externaldnsv1alpha1.DNSEndpoint) bool {
+	waitForDNSEndpoint(t, ctx, direct, fixture.namespace.Name, fixture.identity, "www", func(object *externaldnsv1alpha1.DNSEndpoint) bool {
 		return endpointTargetsEqual(object, "192.0.2.1", "192.0.2.2") && strings.Contains(object.Annotations[dnsendpoint.LifecycleAnnotation], "192.0.2.1")
 	})
-	// Reappearance cancels the durable pending target before its deadline.
-	if err := direct.Get(ctx, client.ObjectKey{Name: node.Name}, node); err != nil {
+	if err := direct.Get(ctx, client.ObjectKey{Name: fixture.node.Name}, fixture.node); err != nil {
 		t.Fatal(err)
 	}
-	node.Labels["network.example/public"] = "192.0.2.1"
-	if err := direct.Update(ctx, node); err != nil {
+	fixture.node.Labels["network.example/public"] = "192.0.2.1"
+	if err := direct.Update(ctx, fixture.node); err != nil {
 		t.Fatal(err)
 	}
-	waitObject("www", func(object *externaldnsv1alpha1.DNSEndpoint) bool {
+	waitForDNSEndpoint(t, ctx, direct, fixture.namespace.Name, fixture.identity, "www", func(object *externaldnsv1alpha1.DNSEndpoint) bool {
 		lifecycle := object.Annotations[dnsendpoint.LifecycleAnnotation]
 		return endpointTargetsEqual(object, "192.0.2.1", "192.0.2.2") && !strings.Contains(lifecycle, `"target":"192.0.2.1"`) && strings.Contains(lifecycle, `"target":"192.0.2.2"`)
 	})
-	// Delete the source: Kubernetes deletion completes immediately while objects enter grace.
-	if err := direct.Delete(ctx, ingress); err != nil {
+}
+
+func exerciseSourceDeletionAndRestartRecovery(t *testing.T, ctx context.Context, direct client.Client, fixture dnsEndpointIsolationFixture, stop func(), start func() func()) {
+	t.Helper()
+	if err := direct.Delete(ctx, fixture.ingress); err != nil {
 		t.Fatal(err)
 	}
 	var deleted networkingv1.Ingress
-	if err := direct.Get(ctx, client.ObjectKeyFromObject(ingress), &deleted); !apierrors.IsNotFound(err) {
+	if err := direct.Get(ctx, client.ObjectKeyFromObject(fixture.ingress), &deleted); !apierrors.IsNotFound(err) {
 		t.Fatalf("source deletion blocked: %v", err)
 	}
 	for _, provider := range []string{"www", "vpn"} {
-		waitObject(provider, func(object *externaldnsv1alpha1.DNSEndpoint) bool {
+		waitForDNSEndpoint(t, ctx, direct, fixture.namespace.Name, fixture.identity, provider, func(object *externaldnsv1alpha1.DNSEndpoint) bool {
 			return strings.Contains(object.Annotations[dnsendpoint.LifecycleAnnotation], `"target"`)
 		})
 	}
-	// Stop before grace expiry. Initial DNSEndpoint watch events in a fresh manager recover timers.
 	stop()
-	cancel = nil
-	cancel, done = startManager()
+	_ = start()
 	for _, provider := range []string{"www", "vpn"} {
-		key := client.ObjectKey{Namespace: namespace.Name, Name: dnsendpoint.ObjectName(identity, provider)}
-		deadline := time.Now().Add(10 * time.Second)
-		for time.Now().Before(deadline) {
-			var object externaldnsv1alpha1.DNSEndpoint
-			if err := direct.Get(ctx, key, &object); apierrors.IsNotFound(err) {
-				break
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		var object externaldnsv1alpha1.DNSEndpoint
-		if err := direct.Get(ctx, key, &object); !apierrors.IsNotFound(err) {
-			t.Fatalf("provider %s remained after recovered deadline: %v", provider, err)
-		}
+		waitForDNSEndpointDeletion(t, ctx, direct, fixture.namespace.Name, fixture.identity, provider)
 	}
+}
+
+func TestManagerDNSEndpointIsolationAndRestartRecovery(t *testing.T) {
+	config, scheme, direct := sharedIntegration(t)
+	t.Cleanup(func() { cleanupSharedNamespaces(t, "dnsendpoint") })
+	t.Cleanup(func() { cleanupSharedClusterObjects(t, []string{"www", "vpn"}, nil, nil) })
+	t.Cleanup(func() { cleanupSharedNodes(t, "worker") })
+	ctx := context.Background()
+	startManager := func() func() { return startDNSEndpointManager(t, config, scheme) }
+	stop := startManager()
+	fixture := createDNSEndpointIsolationFixture(t, direct)
+	www := waitForDNSEndpoint(t, ctx, direct, fixture.namespace.Name, fixture.identity, "www", func(object *externaldnsv1alpha1.DNSEndpoint) bool { return endpointTargetsEqual(object, "192.0.2.1") })
+	vpn := waitForDNSEndpoint(t, ctx, direct, fixture.namespace.Name, fixture.identity, "vpn", func(object *externaldnsv1alpha1.DNSEndpoint) bool { return endpointTargetsEqual(object, "10.0.0.1") })
+	assertDNSEndpointProviderIsolation(t, www, vpn, fixture.cloudflare)
+	exerciseProviderDeletionAndRecreation(t, ctx, direct, fixture)
+	exerciseSourceDisablementAndReenable(t, ctx, direct, fixture)
+	exerciseNodeTargetRotation(t, ctx, direct, fixture)
+	exerciseSourceDeletionAndRestartRecovery(t, ctx, direct, fixture, stop, startManager)
 }
 
 func endpointTargetsEqual(object *externaldnsv1alpha1.DNSEndpoint, expected ...string) bool {
@@ -452,132 +419,159 @@ func endpointTargetsEqual(object *externaldnsv1alpha1.DNSEndpoint, expected ...s
 	return slices.Equal(actual, expected)
 }
 
-func TestWriterAPIServerContract(t *testing.T) { //nolint:gocyclo
-	environment := &envtest.Environment{CRDDirectoryPaths: []string{filepath.Join("..", "..", "test", "fixtures", "external-dns-v0.21.0")}, ErrorIfCRDPathMissing: true}
-	config, err := environment.Start()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := environment.Stop(); err != nil {
-			t.Errorf("stop envtest: %v", err)
-		}
-	}()
-	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, externaldnsv1alpha1.AddToScheme} {
-		if err := add(scheme); err != nil {
-			t.Fatal(err)
-		}
-	}
-	direct, err := client.New(config, client.Options{Scheme: scheme})
-	if err != nil {
-		t.Fatal(err)
-	}
+type writerContractFixture struct {
+	ctx       context.Context
+	direct    client.Client
+	clock     lifecycleClock
+	writer    *dnsendpoint.Writer
+	namespace string
+	identity  source.Identity
+	shared    source.Publication
+}
+
+func createWriterContractFixture(t *testing.T, direct client.Client) writerContractFixture {
+	t.Helper()
 	ctx := context.Background()
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "writer-contract"}}
 	if err := direct.Create(ctx, namespace); err != nil {
 		t.Fatal(err)
 	}
 	clock := lifecycleClock{now: time.Date(2026, 8, 30, 20, 0, 0, 0, time.UTC)}
-	writer := &dnsendpoint.Writer{Client: direct, Clock: clock}
 	identity := source.Identity{APIVersion: networkingv1.SchemeGroupVersion.String(), Kind: "Ingress", Namespace: namespace.Name, Name: "shared", UID: types.UID("uid-one")}
 	properties := []source.Property{{Name: "proxy", Value: "false"}}
 	shared := source.Publication{ProviderName: "www", DeletionDelay: time.Minute, Records: []source.Record{
 		{DNSName: "same.example.com", RecordType: "A", Targets: []string{"192.0.2.2"}, TTL: 300, ProviderSpecific: properties},
 		{DNSName: "same.example.com", RecordType: "A", Targets: []string{"192.0.2.1", "192.0.2.2"}, TTL: 300, ProviderSpecific: properties},
 	}}
-	if err := writer.Apply(ctx, identity, []source.Publication{shared}); err != nil {
+	return writerContractFixture{
+		ctx:       ctx,
+		direct:    direct,
+		clock:     clock,
+		writer:    &dnsendpoint.Writer{Client: direct, Clock: clock},
+		namespace: namespace.Name,
+		identity:  identity,
+		shared:    shared,
+	}
+}
+
+func changedWriterPublication(fixture writerContractFixture) (source.Identity, source.Publication) {
+	recreated := fixture.identity
+	recreated.UID = types.UID("uid-two")
+	changed := fixture.shared
+	changed.Records = []source.Record{{DNSName: "same.example.com", RecordType: "A", Targets: []string{"192.0.2.1", "192.0.2.2"}, TTL: 600, ProviderSpecific: []source.Property{{Name: "proxy", Value: "true"}}}}
+	return recreated, changed
+}
+
+func assertWriterSharedRRSetAndIdempotence(t *testing.T, fixture writerContractFixture) {
+	t.Helper()
+	if err := fixture.writer.Apply(fixture.ctx, fixture.identity, []source.Publication{fixture.shared}); err != nil {
 		t.Fatal(err)
 	}
-	key := client.ObjectKey{Namespace: namespace.Name, Name: dnsendpoint.ObjectName(identity, "www")}
+	key := client.ObjectKey{Namespace: fixture.namespace, Name: dnsendpoint.ObjectName(fixture.identity, "www")}
 	var object externaldnsv1alpha1.DNSEndpoint
-	if err := direct.Get(ctx, key, &object); err != nil {
+	if err := fixture.direct.Get(fixture.ctx, key, &object); err != nil {
 		t.Fatal(err)
 	}
 	if !endpointTargetsEqual(&object, "192.0.2.1", "192.0.2.2") {
 		t.Fatalf("shared hostname RRset=%#v", object.Spec.Endpoints)
 	}
 	stableVersion := object.ResourceVersion
-	if err := writer.Apply(ctx, identity, []source.Publication{shared}); err != nil {
+	if err := fixture.writer.Apply(fixture.ctx, fixture.identity, []source.Publication{fixture.shared}); err != nil {
 		t.Fatal(err)
 	}
-	if err := direct.Get(ctx, key, &object); err != nil {
+	if err := fixture.direct.Get(fixture.ctx, key, &object); err != nil {
 		t.Fatal(err)
 	}
 	if object.ResourceVersion != stableVersion {
 		t.Fatalf("identical reconciliation wrote DNSEndpoint: %s -> %s", stableVersion, object.ResourceVersion)
 	}
-	recreated := identity
-	recreated.UID = types.UID("uid-two")
-	changed := shared
-	changed.Records = []source.Record{{DNSName: "same.example.com", RecordType: "A", Targets: []string{"192.0.2.1", "192.0.2.2"}, TTL: 600, ProviderSpecific: []source.Property{{Name: "proxy", Value: "true"}}}}
-	if err := writer.Apply(ctx, recreated, []source.Publication{changed}); err != nil {
+}
+
+func assertWriterIdentityAndRecordUpdate(t *testing.T, fixture writerContractFixture, recreated source.Identity, changed source.Publication) {
+	t.Helper()
+	if err := fixture.writer.Apply(fixture.ctx, recreated, []source.Publication{changed}); err != nil {
 		t.Fatal(err)
 	}
-	if err := direct.Get(ctx, key, &object); err != nil {
+	key := client.ObjectKey{Namespace: fixture.namespace, Name: dnsendpoint.ObjectName(recreated, "www")}
+	var object externaldnsv1alpha1.DNSEndpoint
+	if err := fixture.direct.Get(fixture.ctx, key, &object); err != nil {
 		t.Fatal(err)
 	}
 	if object.Annotations[dnsendpoint.SourceUIDAnnotation] != "uid-two" || object.Spec.Endpoints[0].RecordTTL != 600 || len(object.Spec.Endpoints[0].ProviderSpecific) != 1 || object.Spec.Endpoints[0].ProviderSpecific[0].Value != "true" {
 		t.Fatalf("UID/TTL/property update was not immediate: %#v", object)
 	}
+}
+
+func assertWriterRejectsInvalidLifecycle(t *testing.T, fixture writerContractFixture, recreated source.Identity, changed source.Publication) {
+	t.Helper()
 	for provider, invalid := range map[string]string{"malformed": "{", "unknown": `{"version":2,"pending":[]}`} {
 		publication := source.Publication{ProviderName: provider, DeletionDelay: time.Minute, Records: []source.Record{{DNSName: provider + ".example.com", RecordType: "A", Targets: []string{"192.0.2.9"}, TTL: 300}}}
-		if err := writer.Apply(ctx, recreated, append([]source.Publication{changed}, publication)); err != nil {
+		publications := []source.Publication{changed, publication}
+		if err := fixture.writer.Apply(fixture.ctx, recreated, publications); err != nil {
 			t.Fatal(err)
 		}
-		invalidKey := client.ObjectKey{Namespace: namespace.Name, Name: dnsendpoint.ObjectName(recreated, provider)}
+		invalidKey := client.ObjectKey{Namespace: fixture.namespace, Name: dnsendpoint.ObjectName(recreated, provider)}
 		var invalidObject externaldnsv1alpha1.DNSEndpoint
-		if err := direct.Get(ctx, invalidKey, &invalidObject); err != nil {
+		if err := fixture.direct.Get(fixture.ctx, invalidKey, &invalidObject); err != nil {
 			t.Fatal(err)
 		}
 		invalidObject.Annotations[dnsendpoint.LifecycleAnnotation] = invalid
-		if err := direct.Update(ctx, &invalidObject); err != nil {
+		if err := fixture.direct.Update(fixture.ctx, &invalidObject); err != nil {
 			t.Fatal(err)
 		}
 		version := invalidObject.ResourceVersion
-		if err := writer.Apply(ctx, recreated, append([]source.Publication{changed}, publication)); err == nil {
+		if err := fixture.writer.Apply(fixture.ctx, recreated, publications); err == nil {
 			t.Fatalf("%s lifecycle accepted", provider)
 		}
-		if err := direct.Get(ctx, invalidKey, &invalidObject); err != nil {
+		if err := fixture.direct.Get(fixture.ctx, invalidKey, &invalidObject); err != nil {
 			t.Fatal(err)
 		}
 		if invalidObject.ResourceVersion != version || invalidObject.Annotations[dnsendpoint.LifecycleAnnotation] != invalid {
 			t.Fatalf("%s lifecycle did not fail closed", provider)
 		}
-		if err := direct.Delete(ctx, &invalidObject); err != nil {
+		if err := fixture.direct.Delete(fixture.ctx, &invalidObject); err != nil {
 			t.Fatal(err)
 		}
 	}
-	updateBacking := &apiMutationClient{Client: direct, updateConflict: true}
-	updateWriter := &dnsendpoint.Writer{Client: updateBacking, Clock: clock}
+}
+
+func assertWriterRetriesUpdateConflict(t *testing.T, fixture writerContractFixture, recreated source.Identity, changed source.Publication) source.Publication {
+	t.Helper()
+	updateBacking := &apiMutationClient{Client: fixture.direct, updateConflict: true}
+	updateWriter := &dnsendpoint.Writer{Client: updateBacking, Clock: fixture.clock}
 	conflictPublication := source.Publication{ProviderName: "conflict", DeletionDelay: time.Minute, Records: []source.Record{{DNSName: "conflict.example.com", RecordType: "A", Targets: []string{"192.0.2.10"}, TTL: 300}}}
-	if err := writer.Apply(ctx, recreated, []source.Publication{changed, conflictPublication}); err != nil {
+	if err := fixture.writer.Apply(fixture.ctx, recreated, []source.Publication{changed, conflictPublication}); err != nil {
 		t.Fatal(err)
 	}
 	conflictPublication.Records[0].TTL = 900
-	if err := updateWriter.Apply(ctx, recreated, []source.Publication{changed, conflictPublication}); err != nil {
+	if err := updateWriter.Apply(fixture.ctx, recreated, []source.Publication{changed, conflictPublication}); err != nil {
 		t.Fatal(err)
 	}
-	conflictKey := client.ObjectKey{Namespace: namespace.Name, Name: dnsendpoint.ObjectName(recreated, "conflict")}
+	conflictKey := client.ObjectKey{Namespace: fixture.namespace, Name: dnsendpoint.ObjectName(recreated, "conflict")}
 	var conflictObject externaldnsv1alpha1.DNSEndpoint
-	if err := direct.Get(ctx, conflictKey, &conflictObject); err != nil {
+	if err := fixture.direct.Get(fixture.ctx, conflictKey, &conflictObject); err != nil {
 		t.Fatal(err)
 	}
 	if updateBacking.updates != 1 || conflictObject.Spec.Endpoints[0].RecordTTL != 900 || conflictObject.Annotations["example.test/concurrent"] != "preserved" {
 		t.Fatalf("update conflict did not re-fetch/preserve: %#v", conflictObject)
 	}
+	return conflictPublication
+}
+
+func assertWriterRejectsDeleteConflict(t *testing.T, fixture writerContractFixture, recreated source.Identity, changed source.Publication, conflictPublication source.Publication) {
+	t.Helper()
 	deletePublication := source.Publication{ProviderName: "delete-conflict", DeletionDelay: 0, Records: []source.Record{{DNSName: "delete.example.com", RecordType: "A", Targets: []string{"192.0.2.11"}, TTL: 300}}}
-	if err := writer.Apply(ctx, recreated, []source.Publication{changed, conflictPublication, deletePublication}); err != nil {
+	if err := fixture.writer.Apply(fixture.ctx, recreated, []source.Publication{changed, conflictPublication, deletePublication}); err != nil {
 		t.Fatal(err)
 	}
-	deleteBacking := &apiMutationClient{Client: direct, deleteConflict: true}
-	deleteWriter := &dnsendpoint.Writer{Client: deleteBacking, Clock: clock}
-	if err := deleteWriter.Apply(ctx, recreated, []source.Publication{changed, conflictPublication}); err == nil {
+	deleteBacking := &apiMutationClient{Client: fixture.direct, deleteConflict: true}
+	deleteWriter := &dnsendpoint.Writer{Client: deleteBacking, Clock: fixture.clock}
+	if err := deleteWriter.Apply(fixture.ctx, recreated, []source.Publication{changed, conflictPublication}); err == nil {
 		t.Fatal("delete conflict concurrent lifecycle mutation was not rejected")
 	}
-	deleteKey := client.ObjectKey{Namespace: namespace.Name, Name: dnsendpoint.ObjectName(recreated, "delete-conflict")}
+	deleteKey := client.ObjectKey{Namespace: fixture.namespace, Name: dnsendpoint.ObjectName(recreated, "delete-conflict")}
 	var deleteObject externaldnsv1alpha1.DNSEndpoint
-	if err := direct.Get(ctx, deleteKey, &deleteObject); err != nil {
+	if err := fixture.direct.Get(fixture.ctx, deleteKey, &deleteObject); err != nil {
 		t.Fatal(err)
 	}
 	if deleteBacking.deletes != 1 || deleteObject.Annotations[dnsendpoint.LifecycleAnnotation] != `{"version":2,"pending":[]}` {
@@ -585,30 +579,20 @@ func TestWriterAPIServerContract(t *testing.T) { //nolint:gocyclo
 	}
 }
 
+func TestWriterAPIServerContract(t *testing.T) {
+	_, _, direct := sharedIntegration(t)
+	t.Cleanup(func() { cleanupSharedNamespaces(t, "writer-contract") })
+	fixture := createWriterContractFixture(t, direct)
+	assertWriterSharedRRSetAndIdempotence(t, fixture)
+	recreated, changed := changedWriterPublication(fixture)
+	assertWriterIdentityAndRecordUpdate(t, fixture, recreated, changed)
+	assertWriterRejectsInvalidLifecycle(t, fixture, recreated, changed)
+	conflictPublication := assertWriterRetriesUpdateConflict(t, fixture, recreated, changed)
+	assertWriterRejectsDeleteConflict(t, fixture, recreated, changed, conflictPublication)
+}
+
 func TestGatewayDisabledRestartRetiresHTTPRouteWithoutGatewayCRDs(t *testing.T) {
-	environment := &envtest.Environment{CRDDirectoryPaths: []string{
-		filepath.Join("..", "..", "config", "crd", "bases"),
-		filepath.Join("..", "..", "test", "fixtures", "external-dns-v0.21.0"),
-	}, ErrorIfCRDPathMissing: true}
-	config, err := environment.Start()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := environment.Stop(); err != nil {
-			t.Errorf("stop envtest: %v", err)
-		}
-	}()
-	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, externaldnsv1alpha1.AddToScheme, gatewayv1.Install} {
-		if err := add(scheme); err != nil {
-			t.Fatal(err)
-		}
-	}
-	direct, err := client.New(config, client.Options{Scheme: scheme})
-	if err != nil {
-		t.Fatal(err)
-	}
+	config, scheme, direct := startNoGatewayEnvironment(t)
 	ctx := context.Background()
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "gateway-disabled"}}
 	if err := direct.Create(ctx, namespace); err != nil {
@@ -629,18 +613,10 @@ func TestGatewayDisabledRestartRetiresHTTPRouteWithoutGatewayCRDs(t *testing.T) 
 		t.Fatal(err)
 	}
 	output := dnsendpoint.NewWriter(mgr.GetClient())
-	if err := SetupLifecycle(mgr, output, false); err != nil {
+	if err := SetupLifecycle(mgr, output, false, nil); err != nil {
 		t.Fatal(err)
 	}
-	managerContext, cancel := context.WithCancel(ctx)
-	done := make(chan error, 1)
-	go func() { done <- mgr.Start(managerContext) }()
-	defer func() {
-		cancel()
-		if err := <-done; err != nil {
-			t.Errorf("manager stopped: %v", err)
-		}
-	}()
+	_ = startManagedTestManager(t, mgr, ctx)
 	key := client.ObjectKeyFromObject(object)
 	deadline := time.Now().Add(10 * time.Second)
 	observedPending := false

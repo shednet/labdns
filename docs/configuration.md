@@ -54,7 +54,8 @@ is empty.
 | `labdns.shednet.dev/deletion-delay`   | Optional non-negative Go duration, such as `30s` or `5m`, overriding the provider default.                                                                              |
 
 Invalid annotation values fail the complete source reconciliation and preserve
-the previously published output. A selected hostname outside a provider's
+the previously published output. They are reported as terminal reconciliation
+errors and are retried only after a watched input changes. A selected hostname outside a provider's
 zones, or a hostname with no resolved targets for a requested family, produces
 no record for that provider and family.
 
@@ -210,4 +211,7 @@ deadlines.
 
 Generated lifecycle and source-identity annotations are internal controller
 state and must not be edited. Invalid or inconsistent lifecycle state causes
-reconciliation to stop without replacing the existing output.
+reconciliation to stop without replacing the existing output; reconciliation
+resumes when the managed object changes. A source that names a missing
+`DNSProvider` emits a Warning event and follows the same retirement behavior as
+an explicitly removed or deleted provider.

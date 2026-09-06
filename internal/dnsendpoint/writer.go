@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"maps"
 	"reflect"
@@ -64,12 +65,31 @@ type Writer struct {
 	Clock  Clock
 }
 
+type invalidStateError struct{ err error }
+
+func (e invalidStateError) Error() string { return e.err.Error() }
+func (e invalidStateError) Unwrap() error { return e.err }
+
+func invalidState(err error) error {
+	if err == nil || IsInvalidState(err) {
+		return err
+	}
+	return invalidStateError{err: err}
+}
+
+// IsInvalidState reports whether err describes deterministic corruption in a
+// managed DNSEndpoint rather than a transient Kubernetes API failure.
+func IsInvalidState(err error) bool {
+	var target invalidStateError
+	return errors.As(err, &target)
+}
+
 func NewWriter(kubeClient client.Client) *Writer {
 	return &Writer{Client: kubeClient, Clock: realClock{}}
 }
 
 func identityValue(identity source.Identity) string {
-	return strings.Join([]string{identity.APIVersion, identity.Kind, identity.Namespace, identity.Name}, "\x00")
+	return strings.Join([]string{identity.APIVersion, string(identity.Kind), identity.Namespace, identity.Name}, "\x00")
 }
 
 func hash16(value string) string {
@@ -81,7 +101,7 @@ func SourceKey(identity source.Identity) string { return hash16(identityValue(id
 
 func ObjectName(identity source.Identity, provider string) string {
 	hash := hash16(identityValue(identity) + "\x00" + provider)
-	prefix := sanitize(strings.Join([]string{identity.Kind, identity.Name, provider}, "-"))
+	prefix := sanitize(strings.Join([]string{string(identity.Kind), identity.Name, provider}, "-"))
 	const maxPrefix = 253 - 1 - 16
 	if len(prefix) > maxPrefix {
 		prefix = strings.Trim(prefix[:maxPrefix], "-")
@@ -127,25 +147,25 @@ func (m *Writer) Apply(ctx context.Context, identity source.Identity, publicatio
 		object := &existing.Items[i]
 		state, err := parseLifecycle(object.Annotations[LifecycleAnnotation])
 		if err != nil {
-			return fmt.Errorf("DNSEndpoint %s/%s: %w", object.Namespace, object.Name, err)
+			return invalidState(fmt.Errorf("DNSEndpoint %s/%s: %w", object.Namespace, object.Name, err))
 		}
 		currentTargets := endpointTargets(normalizeEndpoints(object.Spec.Endpoints))
 		for _, item := range state.Pending {
 			if _, found := currentTargets[targetKey{item.DNSName, item.RecordType, item.Target}]; !found {
-				return fmt.Errorf("DNSEndpoint %s/%s lifecycle pending target %q/%s/%s is absent from spec", object.Namespace, object.Name, item.DNSName, item.RecordType, item.Target)
+				return invalidState(fmt.Errorf("DNSEndpoint %s/%s lifecycle pending target %q/%s/%s is absent from spec", object.Namespace, object.Name, item.DNSName, item.RecordType, item.Target))
 			}
 		}
 		value := object.Annotations[DeletionDelayAnnotation]
 		delay, err := time.ParseDuration(value)
 		if value == "" || err != nil || delay < 0 {
-			return fmt.Errorf("DNSEndpoint %s/%s has missing or invalid stored deletion delay %q", object.Namespace, object.Name, value)
+			return invalidState(fmt.Errorf("DNSEndpoint %s/%s has missing or invalid stored deletion delay %q", object.Namespace, object.Name, value))
 		}
 		provider := object.Labels[ProviderLabel]
 		if provider == "" || object.Name != ObjectName(identity, provider) {
-			return fmt.Errorf("DNSEndpoint %s/%s has inconsistent provider identity metadata", object.Namespace, object.Name)
+			return invalidState(fmt.Errorf("DNSEndpoint %s/%s has inconsistent provider identity metadata", object.Namespace, object.Name))
 		}
 		if _, found := byProvider[provider]; found {
-			return fmt.Errorf("multiple generated DNSEndpoints found for provider %q", provider)
+			return invalidState(fmt.Errorf("multiple generated DNSEndpoints found for provider %q", provider))
 		}
 		byProvider[provider] = object
 	}
@@ -203,7 +223,7 @@ func (m *Writer) applyOne(ctx context.Context, identity source.Identity, provide
 			return err
 		}
 		if current.Labels[ManagedByLabel] != ManagedByValue || current.Labels[SourceKeyLabel] != SourceKey(identity) || current.Labels[ProviderLabel] != provider {
-			return fmt.Errorf("refusing to overwrite DNSEndpoint %s/%s with incompatible ownership metadata", key.Namespace, key.Name)
+			return invalidState(fmt.Errorf("refusing to overwrite DNSEndpoint %s/%s with incompatible ownership metadata", key.Namespace, key.Name))
 		}
 		updated, buildErr := m.build(identity, provider, publication, &current)
 		if buildErr != nil {
@@ -228,12 +248,12 @@ func (m *Writer) build(identity source.Identity, provider string, publication so
 		var err error
 		state, err = parseLifecycle(current.Annotations[LifecycleAnnotation])
 		if err != nil {
-			return nil, err
+			return nil, invalidState(err)
 		}
 		value := current.Annotations[DeletionDelayAnnotation]
 		storedDelay, err = time.ParseDuration(value)
 		if value == "" || err != nil || storedDelay < 0 {
-			return nil, fmt.Errorf("missing or invalid stored deletion delay %q", value)
+			return nil, invalidState(fmt.Errorf("missing or invalid stored deletion delay %q", value))
 		}
 	}
 	desiredRecords := normalizeRecords(publication.Records)
@@ -246,8 +266,8 @@ func (m *Writer) build(identity source.Identity, provider string, publication so
 	pending := map[targetKey]pendingTarget{}
 	for _, item := range state.Pending {
 		key := targetKey{item.DNSName, item.RecordType, item.Target}
-		if _, found := currentTargets[key]; current != nil && !found {
-			return nil, fmt.Errorf("lifecycle pending target %q/%s/%s is absent from spec", item.DNSName, item.RecordType, item.Target)
+		if _, found := currentTargets[key]; !found {
+			return nil, invalidState(fmt.Errorf("lifecycle pending target %q/%s/%s is absent from spec", item.DNSName, item.RecordType, item.Target))
 		}
 		pending[key] = item
 	}
@@ -303,7 +323,7 @@ func (m *Writer) build(identity source.Identity, provider string, publication so
 		}
 		maps.Copy(result.Annotations, publication.MetadataAnnotations)
 	}
-	result.Annotations[SourceKindAnnotation] = identity.Kind
+	result.Annotations[SourceKindAnnotation] = string(identity.Kind)
 	result.Annotations[SourceNamespaceAnnotation] = identity.Namespace
 	result.Annotations[SourceNameAnnotation] = identity.Name
 	if identity.UID != "" {
@@ -320,7 +340,7 @@ func (m *Writer) build(identity source.Identity, provider string, publication so
 func withoutSourceOwner(references []metav1.OwnerReference, identity source.Identity) []metav1.OwnerReference {
 	result := references[:0]
 	for _, reference := range references {
-		if reference.APIVersion == identity.APIVersion && reference.Kind == identity.Kind && reference.Name == identity.Name {
+		if reference.APIVersion == identity.APIVersion && reference.Kind == string(identity.Kind) && reference.Name == identity.Name {
 			continue
 		}
 		result = append(result, reference)
@@ -345,12 +365,12 @@ func normalizeRecords(records []source.Record) []*endpoint.Endpoint {
 			return properties[i].Name < properties[j].Name
 		})
 		dnsName := strings.ToLower(strings.TrimSuffix(record.DNSName, "."))
-		key := dnsName + "\x00" + record.RecordType
+		key := dnsName + "\x00" + string(record.RecordType)
 		if existing := byRecord[key]; existing != nil {
 			existing.Targets = append(existing.Targets, targets...)
 			continue
 		}
-		byRecord[key] = &endpoint.Endpoint{DNSName: dnsName, RecordType: record.RecordType, Targets: targets, RecordTTL: endpoint.TTL(record.TTL), ProviderSpecific: properties}
+		byRecord[key] = &endpoint.Endpoint{DNSName: dnsName, RecordType: string(record.RecordType), Targets: targets, RecordTTL: endpoint.TTL(record.TTL), ProviderSpecific: properties}
 	}
 	result := make([]*endpoint.Endpoint, 0, len(byRecord))
 	for _, record := range byRecord {
@@ -474,11 +494,11 @@ func (m *Writer) Advance(ctx context.Context, key types.NamespacedName) (time.Du
 		value := current.Annotations[DeletionDelayAnnotation]
 		delay, err := time.ParseDuration(value)
 		if value == "" || err != nil || delay < 0 {
-			return fmt.Errorf("missing or invalid stored deletion delay %q", value)
+			return invalidState(fmt.Errorf("missing or invalid stored deletion delay %q", value))
 		}
 		state, err := parseLifecycle(current.Annotations[LifecycleAnnotation])
 		if err != nil {
-			return err
+			return invalidState(err)
 		}
 		now := m.now()
 		currentTargets := endpointTargets(normalizeEndpoints(current.Spec.Endpoints))
@@ -486,7 +506,7 @@ func (m *Writer) Advance(ctx context.Context, key types.NamespacedName) (time.Du
 		expired := map[targetKey]struct{}{}
 		for _, item := range state.Pending {
 			if _, found := currentTargets[targetKey{item.DNSName, item.RecordType, item.Target}]; !found {
-				return fmt.Errorf("lifecycle pending target %q/%s/%s is absent from spec", item.DNSName, item.RecordType, item.Target)
+				return invalidState(fmt.Errorf("lifecycle pending target %q/%s/%s is absent from spec", item.DNSName, item.RecordType, item.Target))
 			}
 			remaining := deadline(item).Sub(now)
 			if remaining <= 0 {
