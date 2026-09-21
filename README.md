@@ -1,43 +1,65 @@
 # labdns
 
-labdns is a Kubernetes operator that projects Ingress and Gateway API sources
-into ExternalDNS `DNSEndpoint` resources. ExternalDNS remains separately
-installed and is solely responsible for talking to DNS providers.
+labdns helps ExternalDNS publish DNS records for Kubernetes applications.
 
-labdns never writes DNS providers directly and never reads provider Secrets.
-It resolves source backends through EndpointSlices and Node labels, then emits
-one durable DNSEndpoint per source and logical DNSProvider. Provider-label
-filters keep independently managed ExternalDNS deployments isolated.
+Kubernetes does not always provide an address that ExternalDNS can publish for
+an Ingress or HTTPRoute. For example, an ingress controller may run on every
+Node as a DaemonSet and have only a ClusterIP Service, rather than a
+LoadBalancer address. labdns fills this gap by using addresses you assign to
+the Nodes that can serve each application.
 
-Use the [quick start](docs/quick-start.md) to connect an existing ExternalDNS
-deployment and publish an Ingress through labdns. For a complete production
-topology, follow the ordered [installation guide](docs/installation.md). See
-[configuration](docs/configuration.md) for supported sources, annotations,
-provider profiles, target resolution, metrics, and publication isolation.
+It watches opted-in Ingresses and, when enabled, HTTPRoutes. For each hostname,
+labdns follows the backend Service to the Nodes that are serving it, reads the
+publishable IP addresses from Node labels, and creates an ExternalDNS
+`DNSEndpoint` object.
 
-Use the [`labdns` CLI](docs/cli.md) to inspect controller health, list generated
-records, correlate a record with its source and logical provider, and optionally
-compare it with a specific DNS resolver.
+ExternalDNS reads those objects and updates your DNS service. You install and
+manage ExternalDNS separately.
+
+## How it works
+
+1. You define a `DNSProvider`. Despite its name, this is only a labdns settings
+   object. It says which DNS zones and Node address labels to use.
+2. You add labdns annotations to an Ingress or HTTPRoute and choose one or more
+   `DNSProvider` objects.
+3. labdns finds the ready backend endpoints and the Nodes that host them.
+4. labdns creates one `DNSEndpoint` for each selected `DNSProvider`.
+5. A separately installed ExternalDNS deployment reads the matching
+   `DNSEndpoint` objects and publishes them.
+
+You can use different `DNSProvider` objects and ExternalDNS deployments to
+publish different answers for the same hostname. For example, public DNS can
+use public Node addresses while private DNS uses private addresses.
+
+## Get started
+
+labdns requires Kubernetes 1.35 or newer (although it's been verified to work with 1.34),
+the ExternalDNS `DNSEndpoint` CRD, and separately managed ExternalDNS deployment(s).
+
+- Follow the [quick start](docs/quick-start.md) to publish an existing Ingress.
+- Follow the [installation guide](docs/installation.md) for a production setup
+  or to enable Gateway API support.
+- Read the [configuration guide](docs/configuration.md) for annotations,
+  `DNSProvider` settings, address selection, record removal, and metrics.
+- Use the [`labdns` command](docs/cli.md) to check controller health, inspect
+  generated records, and optionally compare them with a DNS resolver.
 
 ## Development
 
-The project requires Go 1.26.1 and Helm. Go-based build and test tools are
-installed under `bin/` by the Makefile; Helm must be available on `PATH`.
+Development requires Go 1.26.1 and Helm. The Makefile installs its Go tools and
+Kubernetes test assets in `bin/`; Helm must already be available on `PATH`.
+
+Run the required checks before submitting a change:
 
 ```sh
-make manifests generate
-make build
-make lint
-make test
-make check-generated
-make check-packaging
+make manifests generate build lint test check-generated check-packaging
 ```
 
-Generated CRDs, RBAC, and `zz_generated.*` files must be updated through the
-generator targets and never edited by hand.
+Do not edit generated CRDs, RBAC, or `zz_generated.*` files by hand. Update
+them with the Makefile targets instead.
 
-Maintainer and release recipes require [`just`](https://just.systems/) to be
-installed separately and available on `PATH`:
+Maintainer and release commands also require
+[`just`](https://just.systems/) on `PATH`:
 
 ```sh
 just --list
@@ -45,11 +67,10 @@ just check
 just release patch
 ```
 
-`release` accepts `patch`, `minor`, or `major`. It verifies synchronized clean
-`main`, runs the complete non-live-E2E gate, updates the chart version, creates
-the release commit and annotated tag, then prompts once before pushing them.
-The separately listed `test-e2e` recipe is live and is never part of `check`.
-It also requires Kind to be installed separately and available on `PATH`.
+`just release` accepts `patch`, `minor`, or `major`. It checks that `main` is
+clean and up to date, runs the release checks, updates the chart version,
+creates a commit and tag, and asks before pushing them. Live end-to-end tests
+are a separate `just test-e2e` command and require Kind.
 
 ## License
 

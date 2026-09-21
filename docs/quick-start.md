@@ -57,7 +57,7 @@ but is optional. Keep the deployment's ownership identifier stable and unique.
 
 If an existing deployment also processes unrelated sources or zones, create a
 separate deployment from the same provider configuration instead of adding the
-labdns settings to it. Do not grant labdns access to ExternalDNS credentials.
+labdns settings to it.
 
 See the complete
 [`www` example](../examples/external-dns/cloudflare-values.yaml) for the tested

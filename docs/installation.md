@@ -33,8 +33,7 @@ Install a fresh environment in this order:
    their domains, ownership IDs, providers, and Secret references first.
    Create the referenced provider credentials and, for the CoreDNS example,
    the etcd Service, credentials, TLS material, and publication path before
-   installing the deployments. Never grant the labdns ServiceAccount access to
-   those Secrets.
+   installing the deployments.
 
    Download and edit the version-matched values files:
 
@@ -59,9 +58,6 @@ Install a fresh environment in this order:
      --version 1.21.1 --namespace dns-system \
      -f external-dns-coredns-etcd-values.yaml
    ```
-
-   These values files do not install provider credentials, etcd, CoreDNS, or
-   any other DNS backend.
 
 3. Install labdns. The chart installs only labdns and its `DNSProvider` CRD:
 

@@ -1,8 +1,7 @@
 # labdns CLI
 
-The `labdns` command inspects publication state through the Kubernetes API. It
-uses the active kubeconfig and never reads provider credentials or Kubernetes
-Secrets.
+The `labdns` command inspects publication state through the Kubernetes API
+using the active kubeconfig.
 
 ## Installation
 

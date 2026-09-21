@@ -31,7 +31,7 @@ env:
 - name: ETCD_KEY_FILE
   value: /etc/external-dns/etcd/tls.key
 # Mount the separately managed TLS Secret with the chart's extraVolumes and
-# extraVolumeMounts values. labdns never receives access to this Secret.
+# extraVolumeMounts values.
 extraVolumes:
 - name: etcd-tls
   secret:

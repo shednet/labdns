@@ -17,6 +17,6 @@ env:
 - name: CF_API_TOKEN
   valueFrom:
     secretKeyRef:
-      # This Secret is separately managed; labdns neither creates nor reads it.
+      # Create this Secret separately for ExternalDNS.
       name: external-dns-cloudflare
       key: api-token

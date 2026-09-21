@@ -161,8 +161,7 @@ Metrics are disabled by default. The Helm chart supports disabled, ordinary
 HTTP, and authenticated HTTPS modes through `metrics.enabled` and
 `metrics.secure`. Supplying `metrics.certificate.existingSecret` mounts a
 separately managed serving certificate. The metrics server reads the mounted
-certificate files, but labdns does not retrieve Secret objects through the
-Kubernetes API and must never receive provider credentials.
+certificate files directly from the mounted volume.
 
 The Kustomize equivalents live in `config/overlays/metrics` and
 `config/overlays/secure-metrics`.
