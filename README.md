@@ -41,7 +41,7 @@ the ExternalDNS `DNSEndpoint` CRD, and separately managed ExternalDNS deployment
   or to enable Gateway API support.
 - Read the [configuration guide](docs/configuration.md) for annotations,
   `DNSProvider` settings, address selection, record removal, and metrics.
-- Use the [`labdns` command](docs/cli.md) to check controller health, inspect
+- Use the [`labdns`](docs/cli.md) command to check controller health, inspect
   generated records, and optionally compare them with a DNS resolver.
 
 ## Development
