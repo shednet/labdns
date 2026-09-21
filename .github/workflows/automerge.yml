@@ -24,7 +24,7 @@ jobs:
     steps:
       - name: Check maintainer permission and current head
         id: eligibility
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const candidates = context.payload.workflow_run.pull_requests;
