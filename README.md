@@ -70,7 +70,15 @@ just release patch
 `just release` accepts `patch`, `minor`, or `major`. It checks that `main` is
 clean and up to date, runs the release checks, updates the chart version,
 creates a commit and tag, and asks before pushing them. Live end-to-end tests
-are a separate `just test-e2e` command and require Kind.
+are a separate `just test-e2e` command and require Kind plus Docker or Podman.
+Docker remains the default. To build images and run E2E with rootless Podman:
+
+```sh
+CONTAINER_TOOL=podman make test-e2e
+```
+
+Kind requires cgroup v2 and delegated controllers for rootless providers; see
+its [rootless provider guide](https://kind.sigs.k8s.io/docs/user/rootless/).
 
 ## License
 

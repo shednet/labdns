@@ -2,8 +2,13 @@
 # Ignore everything by default and re-include only needed files
 **
 
-# Re-include Go source files (but not *_test.go)
+# Re-include Go source files (but not *_test.go). Source directories are
+# named because Podman does not descend into ignored directories; add new
+# top-level Go source directories here too.
 !**/*.go
+!cmd
+!api
+!internal
 **/*_test.go
 
 # Re-include Go module files

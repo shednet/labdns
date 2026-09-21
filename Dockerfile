@@ -2,7 +2,7 @@
 
 # Build the manager binary on the native builder platform. Go cross-compiles
 # the static binary for the requested target platform without QEMU.
-FROM --platform=$BUILDPLATFORM golang:1.26.1@sha256:cd78d88e00afadbedd272f977d375a6247455f3a4b1178f8ae8bbcb201743a8a AS builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.1@sha256:cd78d88e00afadbedd272f977d375a6247455f3a4b1178f8ae8bbcb201743a8a AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

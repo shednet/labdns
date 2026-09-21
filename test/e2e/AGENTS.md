@@ -5,10 +5,13 @@ The E2E suite must run only against the disposable Kind cluster created from
 workers. Never point these tests at a personal, shared, or pre-existing
 cluster. Cleanup must remove the entire named Kind cluster, even after failure,
 while preserving diagnostics long enough for CI artifact upload.
-These tests require a real Docker CLI and daemon. Keep
-`KIND_EXPERIMENTAL_PROVIDER=docker`; other Kind providers are rejected.
-Setup verifies Docker Engine identity fields rather than accepting a merely
-command-compatible runtime.
+These tests require a native Docker or Podman runtime. Docker is the default;
+rootless Podman is selected with `CONTAINER_TOOL=podman`, which also defaults
+`KIND_EXPERIMENTAL_PROVIDER` to `podman`. If both variables are set, they must
+select the same runtime so the image is built in the storage used by Kind.
+Setup verifies runtime-specific identity fields rather than accepting a merely
+command-compatible runtime. Rootless Podman requires cgroup v2 and delegated
+controllers; the host must also satisfy Kind's rootless networking requirements.
 Local runs export diagnostics and then clean up automatically. CI alone sets
 `E2E_KEEP_CLUSTER_ON_FAILURE=true` so its next workflow step can collect more
 diagnostics; the workflow's unconditional cleanup then deletes the exact named
@@ -21,13 +24,14 @@ ID and attempt at job scope. A caller-supplied `KIND_CLUSTER` must likewise be
 unique to that invocation; never reuse a name or invocation ID.
 
 Setup refuses an already existing exact cluster name before writing anything.
-It then writes a temporary marker containing both the invocation ID and cluster
-name before Kind creation, which permits cleanup if creation fails partway.
-Cleanup requires the same pair and refuses a missing or mismatched marker. The
-marker proves authorization by this invocation, not the runtime identity of a
-cluster; safety therefore depends on the invariant that names and invocation
-IDs are unique and never reused. This prevents an old marker from authorizing
-standalone cleanup of a foreign same-name cluster.
+It then writes a temporary marker containing the invocation ID, cluster name,
+and Kind provider before cluster creation, which permits cleanup if creation
+fails partway. Cleanup requires the same triple and refuses a missing or
+mismatched marker. The marker proves authorization by this invocation, not the
+runtime identity of a cluster; safety therefore depends on the invariant that
+names and invocation IDs are unique and never reused. This prevents an old
+marker from authorizing standalone cleanup of a foreign same-name cluster or
+of a same-name cluster managed by the other provider.
 
 Each invocation uses `/tmp/labdns-kind-kubeconfig-<invocation-id>` and the
 exact `kind-<cluster-name>` context. Kind creation, the Go suite, Helm,

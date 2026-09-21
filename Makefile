@@ -101,8 +101,8 @@ lint-workflows: actionlint ## Lint GitHub Actions workflow syntax and expression
 
 KIND_CLUSTER ?=
 E2E_INVOCATION_ID ?=
-KIND_EXPERIMENTAL_PROVIDER ?= docker
-KIND_NODE_IMAGE ?= kindest/node:v1.35.0
+KIND_EXPERIMENTAL_PROVIDER ?= $(notdir $(CONTAINER_TOOL))
+KIND_NODE_IMAGE ?= docker.io/kindest/node:v1.35.0
 KIND_CONFIG ?= test/e2e/kind.yaml
 E2E_KEEP_CLUSTER_ON_FAILURE ?= false
 E2E_DIAGNOSTICS_DIR ?=
@@ -123,19 +123,51 @@ setup-test-e2e: ## Create a fresh isolated dual-stack Kind cluster for E2E tests
 		echo "KIND_CLUSTER must be a lowercase Kind-compatible name of at most 63 characters." >&2; \
 		exit 1; \
 	}
-	@test "$${KIND_EXPERIMENTAL_PROVIDER}" = "docker" || { \
-		echo "E2E requires KIND_EXPERIMENTAL_PROVIDER=docker." >&2; \
-		exit 1; \
-	}
-	@docker_identity="$$(docker info --format '{{.DockerRootDir}}|{{.OSType}}|{{.Architecture}}|{{.ServerVersion}}' 2>/dev/null)" || { \
-		echo "E2E requires an available Docker Engine." >&2; \
-		exit 1; \
-	}; \
-	IFS='|' read -r docker_root docker_os docker_arch docker_version docker_extra <<<"$$docker_identity"; \
-	if [ -z "$$docker_root" ] || [ "$$docker_root" = '<no value>' ] || [ -z "$$docker_version" ] || [ "$$docker_version" = '<no value>' ] || [ -n "$$docker_extra" ]; then \
-		echo "E2E requires Docker Engine identity fields DockerRootDir and ServerVersion." >&2; \
-		exit 1; \
-	fi
+	@runtime_name="$$(basename -- "$(CONTAINER_TOOL)")"; \
+	case "$${KIND_EXPERIMENTAL_PROVIDER}" in \
+		docker) \
+			test "$$runtime_name" = docker || { \
+				echo "E2E provider docker requires CONTAINER_TOOL=docker, not '$(CONTAINER_TOOL)'." >&2; \
+				exit 1; \
+			}; \
+			runtime_identity="$$("$(CONTAINER_TOOL)" info --format '{{.DockerRootDir}}|{{.OSType}}|{{.Architecture}}|{{.ServerVersion}}' 2>/dev/null)" || { \
+				echo "E2E requires an available Docker Engine." >&2; \
+				exit 1; \
+			}; \
+			IFS='|' read -r runtime_root runtime_os runtime_arch runtime_version runtime_extra <<<"$$runtime_identity"; \
+			if [ -z "$$runtime_root" ] || [ "$$runtime_root" = '<no value>' ] || [ -z "$$runtime_version" ] || [ "$$runtime_version" = '<no value>' ] || [ -n "$$runtime_extra" ]; then \
+				echo "E2E requires Docker Engine identity fields DockerRootDir and ServerVersion." >&2; \
+				exit 1; \
+			fi \
+			;; \
+		podman) \
+			test "$$runtime_name" = podman || { \
+				echo "E2E provider podman requires CONTAINER_TOOL=podman, not '$(CONTAINER_TOOL)'." >&2; \
+				exit 1; \
+			}; \
+			runtime_identity="$$("$(CONTAINER_TOOL)" info --format '{{.Host.Security.Rootless}}|{{.Host.CgroupsVersion}}' 2>/dev/null)" || { \
+				echo "E2E requires an available Podman service." >&2; \
+				exit 1; \
+			}; \
+			IFS='|' read -r runtime_rootless runtime_cgroups runtime_extra <<<"$$runtime_identity"; \
+			if [[ ! "$$runtime_rootless" =~ ^(true|false)$$ ]] || [ -z "$$runtime_cgroups" ] || [ "$$runtime_cgroups" = '<no value>' ] || [ -n "$$runtime_extra" ]; then \
+				echo "E2E requires Podman identity fields Host.Security.Rootless and Host.CgroupsVersion." >&2; \
+				exit 1; \
+			fi; \
+			if [ "$$runtime_rootless" != true ]; then \
+				echo "Podman E2E must run rootless." >&2; \
+				exit 1; \
+			fi; \
+			if [ "$$runtime_cgroups" != v2 ]; then \
+				echo "Rootless Podman E2E requires cgroup v2; found '$$runtime_cgroups'." >&2; \
+				exit 1; \
+			fi \
+			;; \
+		*) \
+			echo "E2E supports KIND_EXPERIMENTAL_PROVIDER=docker or podman." >&2; \
+			exit 1 \
+			;; \
+	esac
 	@command -v $(KIND) >/dev/null 2>&1 || { \
 		echo "Kind is required and must be available on PATH." >&2; \
 		exit 1; \
@@ -156,7 +188,7 @@ setup-test-e2e: ## Create a fresh isolated dual-stack Kind cluster for E2E tests
 		echo "Refusing to overwrite the invocation marker '/tmp/labdns-kind-owned-$${E2E_INVOCATION_ID}'." >&2; \
 		exit 1; \
 	fi
-	@printf '%s\n%s\n' "$${E2E_INVOCATION_ID}" "$${KIND_CLUSTER}" >"/tmp/labdns-kind-owned-$${E2E_INVOCATION_ID}"
+	@printf '%s\n%s\n%s\n' "$${E2E_INVOCATION_ID}" "$${KIND_CLUSTER}" "$${KIND_EXPERIMENTAL_PROVIDER}" >"/tmp/labdns-kind-owned-$${E2E_INVOCATION_ID}"
 	@echo "Creating fresh dual-stack Kind cluster '$${KIND_CLUSTER}'..."
 	@create_status=0; \
 	$(KIND) create cluster --name "$${KIND_CLUSTER}" --image "$${KIND_NODE_IMAGE}" --config "$${KIND_CONFIG}" --kubeconfig "/tmp/labdns-kind-kubeconfig-$${E2E_INVOCATION_ID}" || create_status=$$?; \
@@ -175,17 +207,27 @@ setup-test-e2e-stack: ## Build and install the E2E stack in the isolated cluster
 	@kubeconfig="/tmp/labdns-kind-kubeconfig-$${E2E_INVOCATION_ID}"; \
 	context="kind-$${KIND_CLUSTER}"; \
 	image_repository="labdns-controller"; \
+	if [ "$${KIND_EXPERIMENTAL_PROVIDER}" = podman ]; then image_repository="localhost/$${image_repository}"; fi; \
 	image_tag="run-$${KIND_CLUSTER}"; \
 	image="$${image_repository}:$${image_tag}"; \
 	case "$(E2E_IMAGE_PREBUILT)" in \
 		false) $(CONTAINER_TOOL) build --tag "$${image}" . ;; \
 		true) $(CONTAINER_TOOL) image inspect "$${image}" >/dev/null || { \
-			echo "Prebuilt E2E image '$${image}' is not available in Docker." >&2; \
+			echo "Prebuilt E2E image '$${image}' is not available in $(CONTAINER_TOOL)." >&2; \
 			exit 1; \
 		} ;; \
 		*) echo "E2E_IMAGE_PREBUILT must be true or false." >&2; exit 1 ;; \
 	esac; \
-	$(KIND) load docker-image --name "$${KIND_CLUSTER}" "$${image}"; \
+	if [ "$${KIND_EXPERIMENTAL_PROVIDER}" = podman ]; then \
+		image_archive="$$(mktemp --suffix=.tar)"; \
+		trap 'rm -f "$${image_archive}"' EXIT; \
+		$(CONTAINER_TOOL) save --format docker-archive --output "$${image_archive}" "$${image}"; \
+		$(KIND) load image-archive --name "$${KIND_CLUSTER}" "$${image_archive}"; \
+		rm -f "$${image_archive}"; \
+		trap - EXIT; \
+	else \
+		$(KIND) load docker-image --name "$${KIND_CLUSTER}" "$${image}"; \
+	fi; \
 	$(KUBECTL) --kubeconfig "$${kubeconfig}" --context "$${context}" apply -f test/fixtures/external-dns-v0.21.0/dnsendpoints.externaldns.k8s.io.yaml; \
 	$(KUBECTL) --kubeconfig "$${kubeconfig}" --context "$${context}" apply -f config/crd/bases/labdns.shednet.dev_dnsproviders.yaml; \
 	$(KUBECTL) --kubeconfig "$${kubeconfig}" --context "$${context}" apply -f test/e2e/stack.yaml; \
@@ -263,8 +305,9 @@ cleanup-test-e2e: ## Tear down the exact Kind cluster used for e2e tests.
 	fi; \
 	marker_invocation="$$(sed -n '1p' "/tmp/labdns-kind-owned-$${E2E_INVOCATION_ID}")"; \
 	marker_cluster="$$(sed -n '2p' "/tmp/labdns-kind-owned-$${E2E_INVOCATION_ID}")"; \
-	if [ "$$marker_invocation" != "$${E2E_INVOCATION_ID}" ] || [ "$$marker_cluster" != "$${KIND_CLUSTER}" ]; then \
-		echo "Refusing cleanup: marker does not authorize invocation '$${E2E_INVOCATION_ID}' and cluster '$${KIND_CLUSTER}'." >&2; \
+	marker_provider="$$(sed -n '3p' "/tmp/labdns-kind-owned-$${E2E_INVOCATION_ID}")"; \
+	if [ "$$marker_invocation" != "$${E2E_INVOCATION_ID}" ] || [ "$$marker_cluster" != "$${KIND_CLUSTER}" ] || [ "$$marker_provider" != "$${KIND_EXPERIMENTAL_PROVIDER}" ]; then \
+		echo "Refusing cleanup: marker does not authorize invocation '$${E2E_INVOCATION_ID}', cluster '$${KIND_CLUSTER}', and provider '$${KIND_EXPERIMENTAL_PROVIDER}'." >&2; \
 		exit 1; \
 	fi; \
 	if ! grep -Fxq -- "$${KIND_CLUSTER}" <<<"$$clusters"; then \

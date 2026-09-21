@@ -29,10 +29,13 @@ if [[ ! -f "${marker}" ]]; then
 fi
 marker_invocation="$(sed -n '1p' "${marker}")"
 marker_cluster="$(sed -n '2p' "${marker}")"
-if [[ "${marker_invocation}" != "${E2E_INVOCATION_ID}" || "${marker_cluster}" != "${KIND_CLUSTER}" ]]; then
-  echo "Refusing diagnostics: marker does not authorize invocation '${E2E_INVOCATION_ID}' and cluster '${KIND_CLUSTER}'." >&2
+marker_provider="$(sed -n '3p' "${marker}")"
+provider="${KIND_EXPERIMENTAL_PROVIDER:-docker}"
+if [[ "${marker_invocation}" != "${E2E_INVOCATION_ID}" || "${marker_cluster}" != "${KIND_CLUSTER}" || "${marker_provider}" != "${provider}" ]]; then
+  echo "Refusing diagnostics: marker does not authorize invocation '${E2E_INVOCATION_ID}', cluster '${KIND_CLUSTER}', and provider '${provider}'." >&2
   exit 1
 fi
+export KIND_EXPERIMENTAL_PROVIDER="${provider}"
 
 mkdir -p "${E2E_DIAGNOSTICS_DIR}"
 context="kind-${KIND_CLUSTER}"

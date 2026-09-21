@@ -231,22 +231,35 @@ build-local:
     #!/usr/bin/env bash
     set -euo pipefail
     version=$("{{ just }}" version)
-    docker build --tag "{{ image_repository }}:v$version" .
+    container_tool="${CONTAINER_TOOL:-docker}"
+    "${container_tool}" build --tag "{{ image_repository }}:v$version" .
 
 # Build and load into an explicitly named, invocation-owned isolated Kind cluster.
 build-kind cluster:
     #!/usr/bin/env bash
     set -euo pipefail
     cluster='{{ cluster }}'
+    container_tool="${CONTAINER_TOOL:-docker}"
+    provider="${KIND_EXPERIMENTAL_PROVIDER:-$(basename -- "${container_tool}")}"
+    [[ "$(basename -- "${container_tool}")" == "${provider}" ]] || { echo "CONTAINER_TOOL and KIND_EXPERIMENTAL_PROVIDER must select the same runtime." >&2; exit 1; }
+    [[ "${provider}" == docker || "${provider}" == podman ]] || { echo 'The Kind provider must be docker or podman.' >&2; exit 1; }
+    export KIND_EXPERIMENTAL_PROVIDER="${provider}"
     [[ "$cluster" =~ ^labdns-e2e-[a-z0-9]([-a-z0-9]{0,50}[a-z0-9])?$ ]] || { echo 'Cluster must be an explicit labdns-e2e-* isolated cluster name.' >&2; exit 1; }
     command -v kind >/dev/null || { echo 'Kind must be available on PATH.' >&2; exit 1; }
     mapfile -t markers < <(grep -lFx "$cluster" /tmp/labdns-kind-owned-* 2>/dev/null || true)
-    [[ ${#markers[@]} -eq 1 && "$(sed -n '2p' "${markers[0]}")" == "$cluster" ]] || { echo 'Cluster lacks one unambiguous labdns invocation marker.' >&2; exit 1; }
+    [[ ${#markers[@]} -eq 1 && "$(sed -n '2p' "${markers[0]}")" == "$cluster" && "$(sed -n '3p' "${markers[0]}")" == "${provider}" ]] || { echo 'Cluster lacks one unambiguous labdns invocation marker for the selected provider.' >&2; exit 1; }
     kind get clusters | grep -Fxq "$cluster" || { echo "Kind cluster $cluster does not exist." >&2; exit 1; }
     version=$("{{ just }}" version)
     image="{{ image_repository }}:v$version"
-    docker build --tag "$image" .
-    kind load docker-image "$image" --name "$cluster"
+    "${container_tool}" build --tag "$image" .
+    if [[ "${provider}" == podman ]]; then
+        image_archive=$(mktemp --suffix=.tar)
+        trap 'rm -f "${image_archive}"' EXIT
+        "${container_tool}" save --format docker-archive --output "${image_archive}" "${image}"
+        kind load image-archive "${image_archive}" --name "$cluster"
+    else
+        kind load docker-image "$image" --name "$cluster"
+    fi
 
 # Run the live E2E suite in its isolated Kind environment.
 test-e2e:
