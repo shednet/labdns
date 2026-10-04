@@ -517,6 +517,42 @@ func exerciseManagerWatchGatewaySources(t *testing.T, f *managerWatchFixture) {
 	})
 	output.wait(t, "HTTPRoute", "route", targetIs("192.0.2.9"))
 
+	// Missing address labels must explain the empty publication, and adding
+	// the label must restore targets through the existing Node watch.
+	node := &corev1.Node{}
+	if err := direct.Get(ctx, client.ObjectKey{Name: f.nodeName}, node); err != nil {
+		t.Fatal(err)
+	}
+	delete(node.Labels, "network.example/ip-next")
+	output.drain()
+	if err := direct.Update(ctx, node); err != nil {
+		t.Fatal(err)
+	}
+	output.wait(t, "HTTPRoute", "route", func(publications []source.Publication) bool {
+		return len(publications) == 1 && len(publications[0].Records) == 0
+	})
+	waitForEventReason(t, ctx, direct, "app", "route", "NodeAddressLabelMissing")
+	var diagnostics eventsv1.EventList
+	if err := direct.List(ctx, &diagnostics, client.InNamespace("app")); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range diagnostics.Items {
+		if event.Regarding.Name == "route" && event.Reason == "NodeAddressLabelMissing" {
+			if event.Type != "Warning" || !strings.Contains(event.Note, f.nodeName) || !strings.Contains(event.Note, "network.example/ip-next") || !strings.Contains(event.Note, "www") {
+				t.Fatalf("missing-label event lacks actionable context: %#v", event)
+			}
+		}
+	}
+	if err := direct.Get(ctx, client.ObjectKey{Name: f.nodeName}, node); err != nil {
+		t.Fatal(err)
+	}
+	node.Labels["network.example/ip-next"] = "192.0.2.9"
+	output.drain()
+	if err := direct.Update(ctx, node); err != nil {
+		t.Fatal(err)
+	}
+	output.wait(t, "HTTPRoute", "route", targetIs("192.0.2.9"))
+
 	output.drain()
 	gateway := &gatewayv1.Gateway{}
 	if err := direct.Get(ctx, client.ObjectKey{Namespace: "app", Name: "gateway"}, gateway); err != nil {

@@ -93,18 +93,40 @@ type Output interface {
 	Apply(context.Context, Identity, []Publication) error
 }
 
-type WarningFunc func(reason, message string)
+const (
+	DiagnosticNormal  = "Normal"
+	DiagnosticWarning = "Warning"
+)
 
-func IngressProjection(ingress *networkingv1.Ingress, overrides []string, warn WarningFunc) ([]HostProjection, error) {
+type DiagnosticFunc func(severity, reason, message string)
+
+func IngressProjection(ingress *networkingv1.Ingress, overrides []string, diagnostic DiagnosticFunc) ([]HostProjection, error) {
+	emit := diagnosticOnce(diagnostic)
 	all := map[Backend]struct{}{}
+	hasBackendReference := false
 	if ingress.Spec.DefaultBackend != nil {
+		hasBackendReference = ingress.Spec.DefaultBackend.Service != nil || ingress.Spec.DefaultBackend.Resource != nil
 		if backend, ok := ingressBackend(ingress.Namespace, ingress.Spec.DefaultBackend); ok {
 			all[backend] = struct{}{}
+		} else {
+			diagnoseUnsupportedIngressBackend(ingress, "default backend", ingress.Spec.DefaultBackend, emit)
 		}
 	}
 	rules := map[string]map[Backend]struct{}{}
-	for _, rule := range ingress.Spec.Rules {
+	hasHostname := len(overrides) != 0
+	for ruleIndex, rule := range ingress.Spec.Rules {
+		hasServiceBackend := false
+		if rule.HTTP != nil {
+			for _, path := range rule.HTTP.Paths {
+				hasBackendReference = hasBackendReference || path.Backend.Service != nil || path.Backend.Resource != nil
+				hasServiceBackend = hasServiceBackend || path.Backend.Service != nil
+				diagnoseUnsupportedIngressBackend(ingress, fmt.Sprintf("rule %d (%q)", ruleIndex, rule.Host), &path.Backend, emit)
+			}
+		}
 		if rule.Host == "" || rule.HTTP == nil {
+			if rule.Host == "" && hasServiceBackend && len(overrides) != 0 {
+				emit(DiagnosticNormal, "IngressRuleWithoutHostname", fmt.Sprintf("Ingress %s/%s rule %d has no hostname; its backends are ignored even with hostname overrides", ingress.Namespace, ingress.Name, ruleIndex))
+			}
 			continue
 		}
 		host, err := NormalizeHostname(rule.Host)
@@ -114,6 +136,7 @@ func IngressProjection(ingress *networkingv1.Ingress, overrides []string, warn W
 		if rules[host] == nil {
 			rules[host] = map[Backend]struct{}{}
 		}
+		hasHostname = true
 		for _, path := range rule.HTTP.Paths {
 			if backend, ok := ingressBackend(ingress.Namespace, &path.Backend); ok {
 				rules[host][backend] = struct{}{}
@@ -122,6 +145,9 @@ func IngressProjection(ingress *networkingv1.Ingress, overrides []string, warn W
 		}
 	}
 	if len(overrides) != 0 {
+		if !hasBackendReference {
+			emit(DiagnosticNormal, "NoBackendReferences", fmt.Sprintf("Ingress %s/%s has no backend references", ingress.Namespace, ingress.Name))
+		}
 		backends := backendSet(all)
 		result := make([]HostProjection, 0, len(overrides))
 		for _, hostname := range overrides {
@@ -138,16 +164,51 @@ func IngressProjection(ingress *networkingv1.Ingress, overrides []string, warn W
 			if _, found := rules[host]; found {
 				continue
 			}
+			hasHostname = true
 			if ingress.Spec.DefaultBackend != nil {
 				if backend, ok := ingressBackend(ingress.Namespace, ingress.Spec.DefaultBackend); ok {
 					rules[host] = map[Backend]struct{}{backend: {}}
+				} else {
+					emit(DiagnosticWarning, "TLSHostWithoutBackend", fmt.Sprintf("Ingress %s/%s TLS-only hostname %q has no matching rule and its default backend is unsupported", ingress.Namespace, ingress.Name, host))
 				}
-			} else if warn != nil {
-				warn("TLSHostWithoutBackend", fmt.Sprintf("TLS-only hostname %q has no matching rule or default backend", host))
+			} else {
+				emit(DiagnosticWarning, "TLSHostWithoutBackend", fmt.Sprintf("Ingress %s/%s TLS-only hostname %q has no matching rule or default backend", ingress.Namespace, ingress.Name, host))
 			}
 		}
 	}
+	if !hasHostname {
+		emit(DiagnosticNormal, "NoPublishableHostname", fmt.Sprintf("Ingress %s/%s has no publishable hostname", ingress.Namespace, ingress.Name))
+	}
+	if !hasBackendReference {
+		emit(DiagnosticNormal, "NoBackendReferences", fmt.Sprintf("Ingress %s/%s has no backend references", ingress.Namespace, ingress.Name))
+	}
 	return projectionSet(rules), nil
+}
+
+func diagnoseUnsupportedIngressBackend(ingress *networkingv1.Ingress, location string, backend *networkingv1.IngressBackend, diagnostic DiagnosticFunc) {
+	if backend == nil || backend.Resource == nil {
+		return
+	}
+	group := ""
+	if backend.Resource.APIGroup != nil {
+		group = *backend.Resource.APIGroup
+	}
+	diagnostic(DiagnosticWarning, "UnsupportedBackend", fmt.Sprintf("Ingress %s/%s %s uses unsupported resource backend %s/%s %q", ingress.Namespace, ingress.Name, location, group, backend.Resource.Kind, backend.Resource.Name))
+}
+
+func diagnosticOnce(diagnostic DiagnosticFunc) DiagnosticFunc {
+	if diagnostic == nil {
+		return func(string, string, string) {}
+	}
+	seen := map[string]struct{}{}
+	return func(severity, reason, message string) {
+		key := severity + "\x00" + reason + "\x00" + message
+		if _, found := seen[key]; found {
+			return
+		}
+		seen[key] = struct{}{}
+		diagnostic(severity, reason, message)
+	}
 }
 
 func ingressBackend(namespace string, backend *networkingv1.IngressBackend) (Backend, bool) {
@@ -157,18 +218,19 @@ func ingressBackend(namespace string, backend *networkingv1.IngressBackend) (Bac
 	return Backend{Namespace: namespace, Name: backend.Service.Name}, true
 }
 
-func HTTPRouteProjection(ctx context.Context, reader client.Reader, route *gatewayv1.HTTPRoute, overrides []string, warn WarningFunc) ([]HostProjection, error) {
+func HTTPRouteProjection(ctx context.Context, reader client.Reader, route *gatewayv1.HTTPRoute, overrides []string, diagnostic DiagnosticFunc) ([]HostProjection, error) {
+	emit := diagnosticOnce(diagnostic)
 	all := map[Backend]struct{}{}
+	hasBackendReference := false
 	for _, rule := range route.Spec.Rules {
 		for _, ref := range rule.BackendRefs {
+			hasBackendReference = true
 			backend, ok, err := routeBackend(ctx, reader, route, ref.BackendObjectReference)
 			if err != nil {
 				return nil, err
 			}
 			if !ok {
-				if warn != nil {
-					warn("UnsupportedBackend", fmt.Sprintf("backendRef %q is unsupported or lacks a ReferenceGrant", ref.Name))
-				}
+				emit(DiagnosticWarning, "UnsupportedBackend", fmt.Sprintf("HTTPRoute %s/%s backendRef %q is unsupported or lacks a ReferenceGrant", route.Namespace, route.Name, ref.Name))
 				continue
 			}
 			all[backend] = struct{}{}
@@ -184,6 +246,12 @@ func HTTPRouteProjection(ctx context.Context, reader client.Reader, route *gatew
 			hostnames = append(hostnames, normalized)
 		}
 		hostnames = sortedUnique(hostnames)
+	}
+	if len(hostnames) == 0 {
+		emit(DiagnosticNormal, "NoPublishableHostname", fmt.Sprintf("HTTPRoute %s/%s has no publishable hostname", route.Namespace, route.Name))
+	}
+	if !hasBackendReference {
+		emit(DiagnosticNormal, "NoBackendReferences", fmt.Sprintf("HTTPRoute %s/%s has no backend references", route.Namespace, route.Name))
 	}
 	if len(all) == 0 {
 		return nil, nil

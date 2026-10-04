@@ -19,6 +19,7 @@ package source
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,13 +128,132 @@ func TestIngressProjectionKeepsRuleBackendAssociation(t *testing.T) {
 
 func TestTLSOnlyWithoutDefaultWarnsAndSkips(t *testing.T) {
 	warnings := 0
+	missingBackends := 0
 	ingress := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Namespace: "app"}, Spec: networkingv1.IngressSpec{TLS: []networkingv1.IngressTLS{{Hosts: []string{"tls.example.com"}}}}}
-	got, err := IngressProjection(ingress, nil, func(_, _ string) { warnings++ })
+	got, err := IngressProjection(ingress, nil, func(severity, reason, _ string) {
+		switch {
+		case severity == DiagnosticWarning && reason == "TLSHostWithoutBackend":
+			warnings++
+		case severity == DiagnosticNormal && reason == "NoBackendReferences":
+			missingBackends++
+		default:
+			t.Errorf("unexpected diagnostic = %q %q", severity, reason)
+		}
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 0 || warnings != 1 {
-		t.Fatalf("got=%#v warnings=%d", got, warnings)
+	if len(got) != 0 || warnings != 1 || missingBackends != 1 {
+		t.Fatalf("got=%#v warnings=%d missingBackends=%d", got, warnings, missingBackends)
+	}
+}
+
+func TestProjectionReportsMissingHostnameAndBackendReferences(t *testing.T) {
+	var ingressDiagnostics []string
+	ingress := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "app"}}
+	if _, err := IngressProjection(ingress, nil, func(severity, reason, _ string) {
+		ingressDiagnostics = append(ingressDiagnostics, severity+":"+reason)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := ingressDiagnostics, []string{"Normal:NoPublishableHostname", "Normal:NoBackendReferences"}; !equalStrings(got, want) {
+		t.Fatalf("Ingress diagnostics = %v, want %v", got, want)
+	}
+
+	var routeDiagnostics []string
+	route := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "app"}}
+	if _, err := HTTPRouteProjection(context.Background(), nil, route, nil, func(severity, reason, _ string) {
+		routeDiagnostics = append(routeDiagnostics, severity+":"+reason)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := routeDiagnostics, []string{"Normal:NoPublishableHostname", "Normal:NoBackendReferences"}; !equalStrings(got, want) {
+		t.Fatalf("HTTPRoute diagnostics = %v, want %v", got, want)
+	}
+}
+
+func TestIngressCatchallBackendIsNotReportedAsMissing(t *testing.T) {
+	ingress := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "app"},
+		Spec:       networkingv1.IngressSpec{Rules: []networkingv1.IngressRule{{IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{Paths: []networkingv1.HTTPIngressPath{{Backend: networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{Name: "api"}}}}}}}}},
+	}
+	var reasons []string
+	got, err := IngressProjection(ingress, nil, func(_, reason, _ string) { reasons = append(reasons, reason) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 || len(reasons) != 1 || reasons[0] != "NoPublishableHostname" {
+		t.Fatalf("projection=%#v diagnostics=%v", got, reasons)
+	}
+}
+
+func TestIngressResourceBackendAndTLSFallbackDiagnostics(t *testing.T) {
+	resource := &corev1.TypedLocalObjectReference{APIGroup: new("example.test"), Kind: "Widget", Name: "widget"}
+	ingress := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "app"},
+		Spec: networkingv1.IngressSpec{
+			DefaultBackend: &networkingv1.IngressBackend{Resource: resource},
+			TLS:            []networkingv1.IngressTLS{{Hosts: []string{"tls.example.com"}}},
+		},
+	}
+	var diagnostics []string
+	got, err := IngressProjection(ingress, nil, func(severity, reason, message string) {
+		diagnostics = append(diagnostics, severity+":"+reason+":"+message)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("unsupported resource default backend produced projection: %#v", got)
+	}
+	if len(diagnostics) != 2 || !strings.Contains(diagnostics[0], "Warning:UnsupportedBackend:") || !strings.Contains(diagnostics[1], "Warning:TLSHostWithoutBackend:") {
+		t.Fatalf("diagnostics = %v, want UnsupportedBackend and TLSHostWithoutBackend warnings", diagnostics)
+	}
+	if !strings.Contains(diagnostics[0], "Ingress app/web") || !strings.Contains(diagnostics[0], "Widget") || !strings.Contains(diagnostics[1], "tls.example.com") {
+		t.Fatalf("diagnostic context missing: %v", diagnostics)
+	}
+}
+
+func TestIngressCatchallOverridesExplainIgnoredBackends(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		backend  networkingv1.IngressBackend
+		severity string
+		reason   string
+	}{
+		{
+			name: "Service", backend: networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{Name: "api"}},
+			severity: DiagnosticNormal, reason: "IngressRuleWithoutHostname",
+		},
+		{
+			name: "resource", backend: networkingv1.IngressBackend{Resource: &corev1.TypedLocalObjectReference{APIGroup: new("example.test"), Kind: "Widget", Name: "widget"}},
+			severity: DiagnosticWarning, reason: "UnsupportedBackend",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ingress := &networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "app"},
+				Spec: networkingv1.IngressSpec{Rules: []networkingv1.IngressRule{{
+					IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{Paths: []networkingv1.HTTPIngressPath{{Backend: tc.backend}}}},
+				}}},
+			}
+			var diagnostics []string
+			projection, err := IngressProjection(ingress, []string{"override.example.com"}, func(severity, reason, message string) {
+				diagnostics = append(diagnostics, severity+":"+reason)
+				if !strings.Contains(message, "app/web") {
+					t.Errorf("diagnostic missing source identity: %q", message)
+				}
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(projection) != 1 || projection[0].Hostname != "override.example.com" || len(projection[0].Backends) != 0 {
+				t.Fatalf("catchall override output changed: %#v", projection)
+			}
+			if want := []string{tc.severity + ":" + tc.reason}; !equalStrings(diagnostics, want) {
+				t.Fatalf("diagnostics = %v, want %v", diagnostics, want)
+			}
+		})
 	}
 }
 
@@ -166,12 +286,18 @@ func TestHTTPRouteReferenceGrant(t *testing.T) {
 	}
 	grant.Spec.To[0].Name = ptr.To(gatewayv1beta1.ObjectName("other"))
 	reader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(grant).Build()
-	got, err = HTTPRouteProjection(context.Background(), reader, route, nil, nil)
+	var diagnostics []string
+	got, err = HTTPRouteProjection(context.Background(), reader, route, nil, func(severity, reason, message string) {
+		diagnostics = append(diagnostics, severity+":"+reason+":"+message)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 0 {
 		t.Fatalf("unauthorized backend accepted: %#v", got)
+	}
+	if len(diagnostics) != 1 || !strings.Contains(diagnostics[0], "Warning:UnsupportedBackend:") || !strings.Contains(diagnostics[0], "HTTPRoute app/route") || !strings.Contains(diagnostics[0], `backendRef "api"`) {
+		t.Fatalf("unauthorized backend diagnostics = %v", diagnostics)
 	}
 }
 
@@ -283,8 +409,8 @@ func TestResolverWarnsForHostnameOutsideProviderZones(t *testing.T) {
 	warnings := 0
 	publications, err := (Resolver{}).Publications(
 		context.Background(), []HostProjection{{Hostname: "app.example.com"}},
-		[]*labdnsv1alpha1.DNSProvider{provider}, PublicationOptions{}, func(reason, _ string) {
-			if reason == "HostnameOutsideZones" {
+		[]*labdnsv1alpha1.DNSProvider{provider}, PublicationOptions{}, func(severity, reason, _ string) {
+			if severity == DiagnosticWarning && reason == "HostnameOutsideZones" {
 				warnings++
 			}
 		},
@@ -295,6 +421,125 @@ func TestResolverWarnsForHostnameOutsideProviderZones(t *testing.T) {
 	if warnings != 1 || len(publications) != 1 || len(publications[0].Records) != 0 {
 		t.Fatalf("warnings=%d publications=%#v", warnings, publications)
 	}
+}
+
+func TestResolverAggregatesMissingNodeLabelsAcrossHostnames(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = discoveryv1.AddToScheme(scheme)
+	alpha, beta, zeta := "alpha", "beta", "zeta"
+	ready := true
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "app"}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: alpha}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: beta}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: zeta, Labels: map[string]string{"example.test/v4": "192.0.2.10"}}},
+		&discoveryv1.EndpointSlice{
+			ObjectMeta:  metav1.ObjectMeta{Name: "api", Namespace: "app", Labels: map[string]string{discoveryv1.LabelServiceName: "api"}},
+			AddressType: discoveryv1.AddressTypeIPv4,
+			Endpoints: []discoveryv1.Endpoint{
+				{NodeName: &beta, Conditions: discoveryv1.EndpointConditions{Ready: &ready}},
+				{NodeName: &zeta, Conditions: discoveryv1.EndpointConditions{Ready: &ready}},
+				{NodeName: &alpha, Conditions: discoveryv1.EndpointConditions{Ready: &ready}},
+			},
+		},
+	).Build()
+	provider := &labdnsv1alpha1.DNSProvider{
+		ObjectMeta: metav1.ObjectMeta{Name: "www"},
+		Spec: labdnsv1alpha1.DNSProviderSpec{
+			Zones:     []labdnsv1alpha1.DNSZone{{Name: "example.com"}},
+			IPSources: labdnsv1alpha1.IPSources{IPv4: &labdnsv1alpha1.NodeLabelSource{NodeLabel: "example.test/v4"}},
+		},
+	}
+	backend := []Backend{{Namespace: "app", Name: "api"}}
+	var diagnostics []string
+	publications, err := (Resolver{Reader: kubeClient}).Publications(context.Background(), []HostProjection{
+		{Hostname: "one.example.com", Backends: backend},
+		{Hostname: "two.example.com", Backends: backend},
+	}, []*labdnsv1alpha1.DNSProvider{provider}, PublicationOptions{}, func(severity, reason, message string) {
+		diagnostics = append(diagnostics, severity+":"+reason+":"+message)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(publications) != 1 || len(publications[0].Records) != 2 {
+		t.Fatalf("publications = %#v", publications)
+	}
+	for _, record := range publications[0].Records {
+		if len(record.Targets) != 1 || record.Targets[0] != "192.0.2.10" {
+			t.Fatalf("record = %#v, want only the labelled Node target", record)
+		}
+	}
+	if len(diagnostics) != 1 || !strings.Contains(diagnostics[0], "Warning:NodeAddressLabelMissing:") || !strings.Contains(diagnostics[0], "DNSProvider \"www\"") || !strings.Contains(diagnostics[0], "Service app/api") || !strings.Contains(diagnostics[0], "Nodes [alpha, beta]") {
+		t.Fatalf("diagnostics = %v, want one sorted missing-label warning", diagnostics)
+	}
+}
+
+func TestResolverReportsEndpointAndUnavailableFamilyDiagnostics(t *testing.T) {
+	tests := []struct {
+		name          string
+		endpointSlice *discoveryv1.EndpointSlice
+		wantReason    string
+	}{
+		{name: "no slices", wantReason: "EndpointSlicesUnavailable"},
+		{name: "no ready endpoints", endpointSlice: &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "app", Labels: map[string]string{discoveryv1.LabelServiceName: "api"}}, Endpoints: []discoveryv1.Endpoint{{Conditions: discoveryv1.EndpointConditions{Ready: new(false)}}}}, wantReason: "NoReadyEndpoints"},
+		{name: "ready endpoint without node name", endpointSlice: &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "app", Labels: map[string]string{discoveryv1.LabelServiceName: "api"}}, Endpoints: []discoveryv1.Endpoint{{Conditions: discoveryv1.EndpointConditions{Ready: new(true)}}}}, wantReason: "EndpointNodeNameMissing"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			_ = corev1.AddToScheme(scheme)
+			_ = discoveryv1.AddToScheme(scheme)
+			objects := []runtime.Object{&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "app"}}}
+			if test.endpointSlice != nil {
+				objects = append(objects, test.endpointSlice)
+			}
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objects...).Build()
+			provider := &labdnsv1alpha1.DNSProvider{ObjectMeta: metav1.ObjectMeta{Name: "www"}, Spec: labdnsv1alpha1.DNSProviderSpec{Zones: []labdnsv1alpha1.DNSZone{{Name: "example.com"}}, IPSources: labdnsv1alpha1.IPSources{IPv4: &labdnsv1alpha1.NodeLabelSource{NodeLabel: "example.test/v4"}}}}
+			var diagnostics []string
+			_, err := (Resolver{Reader: kubeClient}).Publications(context.Background(), []HostProjection{{Hostname: "app.example.com", Backends: []Backend{{Namespace: "app", Name: "api"}}}}, []*labdnsv1alpha1.DNSProvider{provider}, PublicationOptions{}, func(severity, reason, _ string) {
+				diagnostics = append(diagnostics, severity+":"+reason)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantSeverity := DiagnosticNormal
+			if test.wantReason == "EndpointNodeNameMissing" {
+				wantSeverity = DiagnosticWarning
+			}
+			if len(diagnostics) != 1 || diagnostics[0] != wantSeverity+":"+test.wantReason {
+				t.Fatalf("diagnostics = %v, want [%s:%s]", diagnostics, wantSeverity, test.wantReason)
+			}
+		})
+	}
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = discoveryv1.AddToScheme(scheme)
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	provider := &labdnsv1alpha1.DNSProvider{ObjectMeta: metav1.ObjectMeta{Name: "www"}, Spec: labdnsv1alpha1.DNSProviderSpec{Zones: []labdnsv1alpha1.DNSZone{{Name: "example.com"}}, IPSources: labdnsv1alpha1.IPSources{IPv4: &labdnsv1alpha1.NodeLabelSource{NodeLabel: "example.test/v4"}}}}
+	var diagnostics []string
+	_, err := (Resolver{Reader: kubeClient}).Publications(context.Background(), []HostProjection{{Hostname: "app.example.com", Backends: []Backend{{Namespace: "app", Name: "missing"}}}}, []*labdnsv1alpha1.DNSProvider{provider}, PublicationOptions{Families: []AddressFamily{IPv6}}, func(severity, reason, _ string) {
+		diagnostics = append(diagnostics, severity+":"+reason)
+	})
+	if err == nil {
+		t.Fatal("expected missing Service error")
+	}
+	if len(diagnostics) == 0 || diagnostics[0] != DiagnosticWarning+":AddressFamilyUnavailable" {
+		t.Fatalf("diagnostics = %v, want Warning:AddressFamilyUnavailable before backend lookup", diagnostics)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 type cancellationReader struct{ client.Reader }

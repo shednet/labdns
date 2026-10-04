@@ -138,6 +138,47 @@ kubectl label node worker-1 \
   networking.example.com/public-ipv6=v6-2001-db8--10
 ```
 
+## Publication diagnostics
+
+labdns reports skipped publication through Kubernetes events on the Ingress or
+HTTPRoute and structured manager logs. Logs include the source kind, namespace,
+name, UID, reason, and message. The message identifies the affected provider,
+Service, Node, label, or address family where applicable.
+
+| Reason | Event type / log level | Meaning |
+| --- | --- | --- |
+| `NodeAddressLabelMissing` | Warning / warn | Ready backend Nodes lack the provider's address label, or its value is empty. Other Nodes may still contribute targets. |
+| `AddressFamilyUnavailable` | Warning / warn | An explicitly requested address family is not configured in the provider. |
+| `EndpointNodeNameMissing` | Warning / warn | A ready backend endpoint has no Node name from which to resolve an address. |
+| `EndpointSlicesUnavailable` | Normal / info | The backend Service has no EndpointSlices. |
+| `NoReadyEndpoints` | Normal / info | The backend Service's EndpointSlices have no ready endpoints. |
+| `NoPublishableHostname` | Normal / info | The source has no usable hostname or hostname override. Gateway listener hostnames are not used as a fallback. |
+| `IngressRuleWithoutHostname` | Normal / info | A hostless Ingress rule's Service backends are ignored even when hostname overrides are present. |
+| `NoBackendReferences` | Normal / info | The source has no backend references, as with a redirect-only HTTPRoute. |
+| `UnsupportedBackend` | Warning / warn | A backend is unsupported; HTTPRoute cross-namespace backends also require a ReferenceGrant. |
+| `TLSHostWithoutBackend` | Warning / warn | An Ingress TLS-only hostname has no matching rule or supported default backend. |
+| `NoProvidersSelected` | Warning / warn | The source is enabled but its effective provider selection is empty. |
+
+Diagnostics explain current selection behavior; they do not add fallback targets
+or change record retirement. Expected readiness gaps use Normal events, while
+configuration problems use Warning events. Disabled sources do not emit these
+empty-publication diagnostics. Existing source warnings are also mirrored into
+manager logs.
+
+Identical diagnostics are deduplicated within a reconciliation and repeated at
+most once every five minutes per source in both events and logs. Changed
+diagnostics are emitted immediately. A successful reconciliation clears resolved
+conditions, so a returning condition is reported immediately. Failed
+reconciliations do not clear prior conditions. Suppression is in memory and
+bounded to 4,096 sources and 128 diagnostic identities per source; a manager
+restart or cache eviction can cause a message to repeat sooner. Kubernetes may
+additionally aggregate repeated events. Event notes longer than 1,024 bytes are
+truncated safely; manager logs retain the full message.
+
+Skipped publication can reconcile successfully and does not increment
+`labdns_reconcile_errors_total`. With no desired targets, existing records follow
+their configured deletion delay.
+
 ## Manager and metrics
 
 labdns accepts only these manager flags:

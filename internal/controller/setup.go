@@ -68,9 +68,10 @@ func Setup(ctx context.Context, mgr manager.Manager, output source.Output, gatew
 		return err
 	}
 	mapper := newMapper(mgr.GetClient())
+	diagnostics := newDiagnosticEmitter()
 	// EnqueueRequestsFromMapFunc maps both ObjectOld and ObjectNew on updates.
 	// This is required for label, backend, Node-placement, and class reassignment changes.
-	ingress := &ingressReconciler{Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("labdns-ingress"), Output: output, Resolver: source.Resolver{Reader: mgr.GetClient()}, Metrics: metrics}
+	ingress := &ingressReconciler{Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("labdns-ingress"), Output: output, Resolver: source.Resolver{Reader: mgr.GetClient()}, Metrics: metrics, diagnostics: diagnostics}
 	b := builder.ControllerManagedBy(mgr).Named("ingress-source").For(&networkingv1.Ingress{}).
 		Watches(&networkingv1.IngressClass{}, handler.EnqueueRequestsFromMapFunc(mapper.ingressClass)).
 		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(mapper.ingressService)).
@@ -84,7 +85,7 @@ func Setup(ctx context.Context, mgr manager.Manager, output source.Output, gatew
 	if !gatewayEnabled {
 		return nil
 	}
-	route := &httpRouteReconciler{Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("labdns-httproute"), Output: output, Resolver: source.Resolver{Reader: mgr.GetClient()}, Metrics: metrics}
+	route := &httpRouteReconciler{Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("labdns-httproute"), Output: output, Resolver: source.Resolver{Reader: mgr.GetClient()}, Metrics: metrics, diagnostics: diagnostics}
 	return builder.ControllerManagedBy(mgr).Named("httproute-source").For(&gatewayv1.HTTPRoute{}).
 		Watches(&gatewayv1.Gateway{}, handler.EnqueueRequestsFromMapFunc(mapper.routeGateway)).
 		Watches(&gatewayv1.GatewayClass{}, handler.EnqueueRequestsFromMapFunc(mapper.routeGatewayClass)).
