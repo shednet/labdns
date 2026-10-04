@@ -331,7 +331,7 @@ func TestIngressMissingProviderWarnsAndDeselects(t *testing.T) {
 		Name: "ing", Namespace: "app", Annotations: map[string]string{
 			source.EnabledAnnotation: "true", source.ProvidersAnnotation: "missing",
 		},
-	}, Spec: networkingv1.IngressSpec{Rules: []networkingv1.IngressRule{{Host: "app.example.com"}}}}
+	}, Spec: networkingv1.IngressSpec{Rules: []networkingv1.IngressRule{ingressRule("app.example.com", "api")}}}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ingress).Build()
 	recorder := events.NewFakeRecorder(1)
 	output := &recordingOutput{}
@@ -350,4 +350,34 @@ func TestIngressMissingProviderWarnsAndDeselects(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("missing-provider warning event not emitted")
 	}
+}
+
+func TestEnabledIngressWithoutSelectedProvidersWarns(t *testing.T) {
+	scheme := testScheme(t)
+	ingress := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{
+		Name: "ing", Namespace: "app", Annotations: map[string]string{source.EnabledAnnotation: "true"},
+	}}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ingress).Build()
+	recorder := events.NewFakeRecorder(2)
+	output := &recordingOutput{}
+	r := &ingressReconciler{Client: kubeClient, Output: output, Recorder: recorder}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(ingress)}); err != nil {
+		t.Fatal(err)
+	}
+	if output.calls != 1 || len(output.publications) != 0 {
+		t.Fatalf("output calls=%d publications=%#v, want one empty publication set", output.calls, output.publications)
+	}
+	assertDiagnosticEvent(t, recorder, "Warning", "NoProvidersSelected", "Ingress is enabled but selects no DNSProviders")
+}
+
+func TestDisabledIngressDoesNotEmitNoProvidersDiagnostic(t *testing.T) {
+	scheme := testScheme(t)
+	ingress := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: "ing", Namespace: "app"}}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ingress).Build()
+	recorder := events.NewFakeRecorder(1)
+	r := &ingressReconciler{Client: kubeClient, Output: &recordingOutput{}, Recorder: recorder}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(ingress)}); err != nil {
+		t.Fatal(err)
+	}
+	assertNoDiagnosticEvent(t, recorder)
 }

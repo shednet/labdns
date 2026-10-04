@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"sort"
+	"sync"
 	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
@@ -42,10 +43,12 @@ const legacyIngressClassAnnotation = "kubernetes.io/ingress.class"
 
 type ingressReconciler struct {
 	client.Client
-	Recorder events.EventRecorder
-	Output   source.Output
-	Resolver source.Resolver
-	Metrics  *Metrics
+	Recorder      events.EventRecorder
+	Output        source.Output
+	Resolver      source.Resolver
+	Metrics       *Metrics
+	diagnostics   *diagnosticEmitter
+	diagnosticsMu sync.Mutex
 }
 
 func (r *ingressReconciler) Reconcile(ctx context.Context, request ctrl.Request) (result ctrl.Result, reconcileErr error) {
@@ -55,48 +58,59 @@ func (r *ingressReconciler) Reconcile(ctx context.Context, request ctrl.Request)
 	var ingress networkingv1.Ingress
 	if err := r.Get(ctx, request.NamespacedName, &ingress); err != nil {
 		if apierrors.IsNotFound(err) {
+			r.diagnosticEmitter().deleteSource(string(sourceKindIngress), request.Namespace, request.Name)
 			r.Metrics.SetSource(string(sourceKindIngress), metricKey, false)
 			err := r.Output.Apply(ctx, source.Identity{APIVersion: networkingv1.SchemeGroupVersion.String(), Kind: sourceKindIngress, Namespace: request.Namespace, Name: request.Name}, nil)
 			return ctrl.Result{}, terminalOutputError(err)
 		}
 		return ctrl.Result{}, err
 	}
+	diagnostics := r.diagnosticEmitter().begin(&ingress, r.Recorder)
+	ctx = diagnostics.context(ctx)
+	defer func() { diagnostics.finish(reconcileErr == nil) }()
 	annotations, err := r.ingressAnnotations(ctx, &ingress)
 	if err != nil {
 		return ctrl.Result{}, terminalSourceError(err)
 	}
 	parsed, err := source.ParseAnnotations(annotations)
 	if err != nil {
-		r.warning(&ingress, "InvalidAnnotations", err.Error())
+		r.warning(ctx, &ingress, "InvalidAnnotations", err.Error())
 		return ctrl.Result{}, terminalSourceError(err)
 	}
 	identity := source.Identity{APIVersion: networkingv1.SchemeGroupVersion.String(), Kind: sourceKindIngress, Namespace: ingress.Namespace, Name: ingress.Name, UID: ingress.UID}
 	r.Metrics.SetSource(string(sourceKindIngress), metricKey, parsed.Enabled && len(parsed.Providers) != 0)
 	if !parsed.Enabled || len(parsed.Providers) == 0 {
+		if parsed.Enabled && len(parsed.Providers) == 0 {
+			r.diagnose(ctx, &ingress, string(source.DiagnosticWarning), "NoProvidersSelected", "Ingress is enabled but selects no DNSProviders")
+		}
 		if err := r.Output.Apply(ctx, identity, nil); err != nil {
-			r.warning(&ingress, "DNSEndpointWriteFailed", err.Error())
+			r.warning(ctx, &ingress, "DNSEndpointWriteFailed", err.Error())
 			return ctrl.Result{}, terminalOutputError(err)
 		}
 		return ctrl.Result{}, nil
 	}
-	projection, err := source.IngressProjection(&ingress, parsed.Hostnames, func(reason, message string) { r.warning(&ingress, reason, message) })
+	projection, err := source.IngressProjection(&ingress, parsed.Hostnames, func(severity, reason, message string) {
+		r.diagnose(ctx, &ingress, severity, reason, message)
+	})
 	if err != nil {
-		r.warning(&ingress, "InvalidSource", err.Error())
+		r.warning(ctx, &ingress, "InvalidSource", err.Error())
 		return ctrl.Result{}, terminalSourceError(err)
 	}
-	providers, err := loadProviders(ctx, r.Client, parsed.Providers, func(reason, message string) { r.warning(&ingress, reason, message) })
+	providers, err := loadProviders(ctx, r.Client, parsed.Providers, func(severity, reason, message string) {
+		r.diagnose(ctx, &ingress, severity, reason, message)
+	})
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	publications, err := r.Resolver.Publications(ctx, projection, providers, publicationOptions(parsed), func(reason, message string) {
-		r.warning(&ingress, reason, message)
+	publications, err := r.Resolver.Publications(ctx, projection, providers, publicationOptions(parsed), func(severity, reason, message string) {
+		r.diagnose(ctx, &ingress, severity, reason, message)
 	})
 	if err != nil {
-		r.warning(&ingress, resolutionWarningReason(err), err.Error())
+		r.warning(ctx, &ingress, resolutionWarningReason(err), err.Error())
 		return ctrl.Result{}, terminalSourceError(err)
 	}
 	if err := r.Output.Apply(ctx, identity, publications); err != nil {
-		r.warning(&ingress, "DNSEndpointWriteFailed", err.Error())
+		r.warning(ctx, &ingress, "DNSEndpointWriteFailed", err.Error())
 		return ctrl.Result{}, terminalOutputError(err)
 	}
 	return ctrl.Result{}, nil
@@ -118,7 +132,7 @@ func (r *ingressReconciler) ingressAnnotations(ctx context.Context, ingress *net
 		if apierrors.IsNotFound(err) {
 			reason = "IngressClassNotFound"
 		}
-		r.warning(ingress, reason, fmt.Sprintf("get IngressClass %s: %v", className, err))
+		r.warning(ctx, ingress, reason, fmt.Sprintf("get IngressClass %s: %v", className, err))
 		wrapped := fmt.Errorf("get IngressClass %s: %w", className, err)
 		if apierrors.IsNotFound(err) {
 			wrapped = source.Invalid(wrapped)
@@ -128,18 +142,31 @@ func (r *ingressReconciler) ingressAnnotations(ctx context.Context, ingress *net
 	return source.MergeAnnotations(class.Annotations, ingress.Annotations), nil
 }
 
-func (r *ingressReconciler) warning(object client.Object, reason, message string) {
-	if r.Recorder != nil {
-		r.Recorder.Eventf(object, nil, "Warning", reason, "Reconcile", "%s", message)
+func (r *ingressReconciler) warning(ctx context.Context, object client.Object, reason, message string) {
+	r.diagnose(ctx, object, string(source.DiagnosticWarning), reason, message)
+}
+
+func (r *ingressReconciler) diagnose(ctx context.Context, object client.Object, severity, reason, message string) {
+	reportSourceDiagnostic(ctx, object, r.Recorder, r.diagnosticEmitter(), severity, reason, message)
+}
+
+func (r *ingressReconciler) diagnosticEmitter() *diagnosticEmitter {
+	r.diagnosticsMu.Lock()
+	defer r.diagnosticsMu.Unlock()
+	if r.diagnostics == nil {
+		r.diagnostics = newDiagnosticEmitter()
 	}
+	return r.diagnostics
 }
 
 type httpRouteReconciler struct {
 	client.Client
-	Recorder events.EventRecorder
-	Output   source.Output
-	Resolver source.Resolver
-	Metrics  *Metrics
+	Recorder      events.EventRecorder
+	Output        source.Output
+	Resolver      source.Resolver
+	Metrics       *Metrics
+	diagnostics   *diagnosticEmitter
+	diagnosticsMu sync.Mutex
 }
 
 func (r *httpRouteReconciler) Reconcile(ctx context.Context, request ctrl.Request) (result ctrl.Result, reconcileErr error) {
@@ -149,48 +176,59 @@ func (r *httpRouteReconciler) Reconcile(ctx context.Context, request ctrl.Reques
 	var route gatewayv1.HTTPRoute
 	if err := r.Get(ctx, request.NamespacedName, &route); err != nil {
 		if apierrors.IsNotFound(err) {
+			r.diagnosticEmitter().deleteSource(string(sourceKindHTTPRoute), request.Namespace, request.Name)
 			r.Metrics.SetSource(string(sourceKindHTTPRoute), metricKey, false)
 			err := r.Output.Apply(ctx, source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: sourceKindHTTPRoute, Namespace: request.Namespace, Name: request.Name}, nil)
 			return ctrl.Result{}, terminalOutputError(err)
 		}
 		return ctrl.Result{}, err
 	}
+	diagnostics := r.diagnosticEmitter().begin(&route, r.Recorder)
+	ctx = diagnostics.context(ctx)
+	defer func() { diagnostics.finish(reconcileErr == nil) }()
 	annotations, err := r.routeAnnotations(ctx, &route)
 	if err != nil {
 		return ctrl.Result{}, terminalSourceError(err)
 	}
 	parsed, err := source.ParseAnnotations(annotations)
 	if err != nil {
-		r.warning(&route, "InvalidAnnotations", err.Error())
+		r.warning(ctx, &route, "InvalidAnnotations", err.Error())
 		return ctrl.Result{}, terminalSourceError(err)
 	}
 	identity := source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: sourceKindHTTPRoute, Namespace: route.Namespace, Name: route.Name, UID: route.UID}
 	r.Metrics.SetSource(string(sourceKindHTTPRoute), metricKey, parsed.Enabled && len(parsed.Providers) != 0)
 	if !parsed.Enabled || len(parsed.Providers) == 0 {
+		if parsed.Enabled && len(parsed.Providers) == 0 {
+			r.diagnose(ctx, &route, string(source.DiagnosticWarning), "NoProvidersSelected", "HTTPRoute is enabled but selects no DNSProviders")
+		}
 		if err := r.Output.Apply(ctx, identity, nil); err != nil {
-			r.warning(&route, "DNSEndpointWriteFailed", err.Error())
+			r.warning(ctx, &route, "DNSEndpointWriteFailed", err.Error())
 			return ctrl.Result{}, terminalOutputError(err)
 		}
 		return ctrl.Result{}, nil
 	}
-	projection, err := source.HTTPRouteProjection(ctx, r.Client, &route, parsed.Hostnames, func(reason, message string) { r.warning(&route, reason, message) })
+	projection, err := source.HTTPRouteProjection(ctx, r.Client, &route, parsed.Hostnames, func(severity, reason, message string) {
+		r.diagnose(ctx, &route, severity, reason, message)
+	})
 	if err != nil {
-		r.warning(&route, "ResolutionFailed", err.Error())
+		r.warning(ctx, &route, "ResolutionFailed", err.Error())
 		return ctrl.Result{}, terminalSourceError(err)
 	}
-	providers, err := loadProviders(ctx, r.Client, parsed.Providers, func(reason, message string) { r.warning(&route, reason, message) })
+	providers, err := loadProviders(ctx, r.Client, parsed.Providers, func(severity, reason, message string) {
+		r.diagnose(ctx, &route, severity, reason, message)
+	})
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	publications, err := r.Resolver.Publications(ctx, projection, providers, publicationOptions(parsed), func(reason, message string) {
-		r.warning(&route, reason, message)
+	publications, err := r.Resolver.Publications(ctx, projection, providers, publicationOptions(parsed), func(severity, reason, message string) {
+		r.diagnose(ctx, &route, severity, reason, message)
 	})
 	if err != nil {
-		r.warning(&route, resolutionWarningReason(err), err.Error())
+		r.warning(ctx, &route, resolutionWarningReason(err), err.Error())
 		return ctrl.Result{}, terminalSourceError(err)
 	}
 	if err := r.Output.Apply(ctx, identity, publications); err != nil {
-		r.warning(&route, "DNSEndpointWriteFailed", err.Error())
+		r.warning(ctx, &route, "DNSEndpointWriteFailed", err.Error())
 		return ctrl.Result{}, terminalOutputError(err)
 	}
 	return ctrl.Result{}, nil
@@ -212,7 +250,7 @@ func (r *httpRouteReconciler) routeAnnotations(ctx context.Context, route *gatew
 			if apierrors.IsNotFound(err) {
 				reason = "GatewayNotFound"
 			}
-			r.warning(route, reason, fmt.Sprintf("get Gateway %s/%s: %v", namespace, ref.Name, err))
+			r.warning(ctx, route, reason, fmt.Sprintf("get Gateway %s/%s: %v", namespace, ref.Name, err))
 			wrapped := fmt.Errorf("get Gateway %s/%s: %w", namespace, ref.Name, err)
 			if apierrors.IsNotFound(err) {
 				wrapped = source.Invalid(wrapped)
@@ -225,7 +263,7 @@ func (r *httpRouteReconciler) routeAnnotations(ctx context.Context, route *gatew
 			if apierrors.IsNotFound(err) {
 				reason = "GatewayClassNotFound"
 			}
-			r.warning(route, reason, fmt.Sprintf("get GatewayClass %s: %v", gateway.Spec.GatewayClassName, err))
+			r.warning(ctx, route, reason, fmt.Sprintf("get GatewayClass %s: %v", gateway.Spec.GatewayClassName, err))
 			wrapped := fmt.Errorf("get GatewayClass %s: %w", gateway.Spec.GatewayClassName, err)
 			if apierrors.IsNotFound(err) {
 				wrapped = source.Invalid(wrapped)
@@ -240,20 +278,31 @@ func (r *httpRouteReconciler) routeAnnotations(ctx context.Context, route *gatew
 	for _, chain := range chains[1:] {
 		if !maps.Equal(chains[0], chain) {
 			err := source.Invalid(errors.New("supported Gateway parent chains resolve to different relevant annotations"))
-			r.warning(route, "AmbiguousParents", err.Error())
+			r.warning(ctx, route, "AmbiguousParents", err.Error())
 			return nil, err
 		}
 	}
 	return chains[0], nil
 }
 
-func (r *httpRouteReconciler) warning(object client.Object, reason, message string) {
-	if r.Recorder != nil {
-		r.Recorder.Eventf(object, nil, "Warning", reason, "Reconcile", "%s", message)
-	}
+func (r *httpRouteReconciler) warning(ctx context.Context, object client.Object, reason, message string) {
+	r.diagnose(ctx, object, string(source.DiagnosticWarning), reason, message)
 }
 
-func loadProviders(ctx context.Context, reader client.Reader, names []string, warn source.WarningFunc) ([]*labdnsv1alpha1.DNSProvider, error) {
+func (r *httpRouteReconciler) diagnose(ctx context.Context, object client.Object, severity, reason, message string) {
+	reportSourceDiagnostic(ctx, object, r.Recorder, r.diagnosticEmitter(), severity, reason, message)
+}
+
+func (r *httpRouteReconciler) diagnosticEmitter() *diagnosticEmitter {
+	r.diagnosticsMu.Lock()
+	defer r.diagnosticsMu.Unlock()
+	if r.diagnostics == nil {
+		r.diagnostics = newDiagnosticEmitter()
+	}
+	return r.diagnostics
+}
+
+func loadProviders(ctx context.Context, reader client.Reader, names []string, diagnostic source.DiagnosticFunc) ([]*labdnsv1alpha1.DNSProvider, error) {
 	result := make([]*labdnsv1alpha1.DNSProvider, 0, len(names))
 	for _, name := range names {
 		var provider labdnsv1alpha1.DNSProvider
@@ -261,13 +310,13 @@ func loadProviders(ctx context.Context, reader client.Reader, names []string, wa
 			if apierrors.IsNotFound(err) {
 				// A deleted profile is an authoritative deselection. The output layer
 				// retires only that profile's targets using its stored delay.
-				if warn != nil {
-					warn("DNSProviderNotFound", fmt.Sprintf("DNSProvider %q was not found; its publication is deselected", name))
+				if diagnostic != nil {
+					diagnostic(string(source.DiagnosticWarning), "DNSProviderNotFound", fmt.Sprintf("DNSProvider %q was not found; its publication is deselected", name))
 				}
 				continue
 			}
-			if warn != nil {
-				warn("DNSProviderReadFailed", fmt.Sprintf("get DNSProvider %s: %v", name, err))
+			if diagnostic != nil {
+				diagnostic(string(source.DiagnosticWarning), "DNSProviderReadFailed", fmt.Sprintf("get DNSProvider %s: %v", name, err))
 			}
 			return nil, fmt.Errorf("get DNSProvider %s: %w", name, err)
 		}

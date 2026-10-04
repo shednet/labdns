@@ -48,11 +48,12 @@ func (r Resolver) Publications(
 	projection []HostProjection,
 	providers []*labdnsv1alpha1.DNSProvider,
 	options PublicationOptions,
-	warn WarningFunc,
+	diagnostic DiagnosticFunc,
 ) ([]Publication, error) {
+	emit := diagnosticOnce(diagnostic)
 	result := make([]Publication, 0, len(providers))
 	for _, provider := range providers {
-		publication, err := r.publication(ctx, projection, provider, options, warn)
+		publication, err := r.publication(ctx, projection, provider, options, emit)
 		if err != nil {
 			return nil, err
 		}
@@ -67,7 +68,7 @@ func (r Resolver) publication(
 	projection []HostProjection,
 	provider *labdnsv1alpha1.DNSProvider,
 	options PublicationOptions,
-	warn WarningFunc,
+	diagnostic DiagnosticFunc,
 ) (Publication, error) {
 	families := options.Families
 	if len(families) == 0 {
@@ -76,6 +77,11 @@ func (r Resolver) publication(
 		}
 		if provider.Spec.IPSources.IPv6 != nil {
 			families = append(families, IPv6)
+		}
+	}
+	for _, family := range families {
+		if labelFor(provider, family) == "" {
+			diagnostic(DiagnosticWarning, "AddressFamilyUnavailable", fmt.Sprintf("DNSProvider %q has no Node label source configured for requested %s address family", provider.Name, addressFamilyName(family)))
 		}
 	}
 	properties, metadata := providerProperties(provider, options.Annotations)
@@ -100,14 +106,12 @@ func (r Resolver) publication(
 	}
 	for _, host := range projection {
 		if matchingZone(host.Hostname, zones) == "" {
-			if warn != nil {
-				warn("HostnameOutsideZones", fmt.Sprintf("hostname %q is outside DNSProvider %q zones", host.Hostname, provider.Name))
-			}
+			diagnostic(DiagnosticWarning, "HostnameOutsideZones", fmt.Sprintf("hostname %q is outside DNSProvider %q zones", host.Hostname, provider.Name))
 			continue
 		}
 		targets := map[AddressFamily]map[string]struct{}{IPv4: {}, IPv6: {}}
 		for _, backend := range host.Backends {
-			resolved, err := r.backendTargets(ctx, backend, provider, families)
+			resolved, err := r.backendTargets(ctx, backend, provider, families, diagnostic)
 			if err != nil {
 				return Publication{}, err
 			}
@@ -138,7 +142,7 @@ func (r Resolver) publication(
 	return publication, nil
 }
 
-func (r Resolver) backendTargets(ctx context.Context, backend Backend, provider *labdnsv1alpha1.DNSProvider, families []AddressFamily) (map[AddressFamily][]string, error) {
+func (r Resolver) backendTargets(ctx context.Context, backend Backend, provider *labdnsv1alpha1.DNSProvider, families []AddressFamily, diagnostic DiagnosticFunc) (map[AddressFamily][]string, error) {
 	var service corev1.Service
 	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: backend.Namespace, Name: backend.Name}, &service); err != nil {
 		wrapped := fmt.Errorf("get Service %s: %w", backend.Key(), err)
@@ -151,20 +155,35 @@ func (r Resolver) backendTargets(ctx context.Context, backend Backend, provider 
 	if err := r.Reader.List(ctx, &slices, client.InNamespace(backend.Namespace), client.MatchingLabels{discoveryv1.LabelServiceName: backend.Name}); err != nil {
 		return nil, dependency("EndpointSliceReadFailed", fmt.Errorf("list EndpointSlices for Service %s: %w", backend.Key(), err))
 	}
+	if len(slices.Items) == 0 {
+		diagnostic(DiagnosticNormal, "EndpointSlicesUnavailable", fmt.Sprintf("Service %s has no EndpointSlices", backend.Key()))
+		return map[AddressFamily][]string{}, nil
+	}
 	nodeNames := map[string]struct{}{}
+	readyEndpoints := 0
+	readyEndpointsWithoutNodeName := 0
 	for i := range slices.Items {
 		for _, endpoint := range slices.Items[i].Endpoints {
-			if endpoint.NodeName == nil || *endpoint.NodeName == "" {
+			if endpoint.Conditions.Ready != nil && !*endpoint.Conditions.Ready {
 				continue
 			}
-			if endpoint.Conditions.Ready != nil && !*endpoint.Conditions.Ready {
+			readyEndpoints++
+			if endpoint.NodeName == nil || *endpoint.NodeName == "" {
+				readyEndpointsWithoutNodeName++
 				continue
 			}
 			nodeNames[*endpoint.NodeName] = struct{}{}
 		}
 	}
+	if readyEndpoints == 0 {
+		diagnostic(DiagnosticNormal, "NoReadyEndpoints", fmt.Sprintf("Service %s has EndpointSlices but no ready endpoints", backend.Key()))
+	}
+	if readyEndpointsWithoutNodeName > 0 {
+		diagnostic(DiagnosticWarning, "EndpointNodeNameMissing", fmt.Sprintf("Service %s has %d ready endpoint(s) without nodeName", backend.Key(), readyEndpointsWithoutNodeName))
+	}
 	result := map[AddressFamily][]string{}
-	for nodeName := range nodeNames {
+	missingLabels := map[AddressFamily][]string{}
+	for _, nodeName := range stringSet(nodeNames) {
 		var node corev1.Node
 		if err := r.Reader.Get(ctx, client.ObjectKey{Name: nodeName}, &node); err != nil {
 			wrapped := fmt.Errorf("get Node %s for Service %s: %w", nodeName, backend.Key(), err)
@@ -180,6 +199,7 @@ func (r Resolver) backendTargets(ctx context.Context, backend Backend, provider 
 			}
 			value := node.Labels[label]
 			if value == "" {
+				missingLabels[family] = append(missingLabels[family], nodeName)
 				continue
 			}
 			address, err := parseNodeAddress(value, family)
@@ -189,10 +209,28 @@ func (r Resolver) backendTargets(ctx context.Context, backend Backend, provider 
 			result[family] = append(result[family], address.String())
 		}
 	}
+	for _, family := range families {
+		nodeList := missingLabels[family]
+		if len(nodeList) == 0 {
+			continue
+		}
+		diagnostic(DiagnosticWarning, "NodeAddressLabelMissing", fmt.Sprintf("DNSProvider %q Service %s is missing Node label %q for %s on Nodes [%s]", provider.Name, backend.Key(), labelFor(provider, family), addressFamilyName(family), strings.Join(sortedUnique(nodeList), ", ")))
+	}
 	for family := range result {
 		result[family] = sortedUnique(result[family])
 	}
 	return result, nil
+}
+
+func addressFamilyName(family AddressFamily) string {
+	switch family {
+	case IPv4:
+		return "IPv4"
+	case IPv6:
+		return "IPv6"
+	default:
+		return string(family)
+	}
 }
 
 func parseNodeAddress(value string, family AddressFamily) (netip.Addr, error) {
