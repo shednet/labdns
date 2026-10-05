@@ -131,7 +131,7 @@ jobs:
           go-version: 1.26.1
           cache: true
       - name: Restore validation tools
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             bin/actionlint*
@@ -187,7 +187,7 @@ jobs:
           go-version: 1.26.1
           cache: true
       - name: Restore test tools and envtest assets
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             bin/controller-gen*
