@@ -12,7 +12,9 @@ zone:
 - [Installation](https://github.com/shednet/labdns/blob/main/docs/installation.md)
 - [Configuration](https://github.com/shednet/labdns/blob/main/docs/configuration.md)
 
-Gateway API access is disabled by default. Metrics are disabled by default and
+Gateway API access for HTTPRoute, TCPRoute, and UDPRoute is disabled by
+default. Enable `gatewayAPI.enabled` only after installing the Gateway API
+v1.6.0 CRDs. Metrics are disabled by default and
 can be exposed as ordinary HTTP or authenticated HTTPS. See the repository's
 [`values.yaml`](https://github.com/shednet/labdns/blob/main/charts/labdns/values.yaml)
 for chart settings and the configuration guide for manager flags, source
