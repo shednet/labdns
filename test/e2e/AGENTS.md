@@ -45,7 +45,7 @@ both files for recovery.
 Tests must cross the real publication path:
 
 ```text
-Ingress / HTTPRoute
+Ingress / HTTPRoute / TCPRoute / UDPRoute
   -> labdns
   -> provider-labeled DNSEndpoint
   -> separate ExternalDNS v0.21.0 deployments
@@ -57,6 +57,18 @@ The `www` and `vpn` paths must use distinct label filters, stable owner IDs,
 etcd backends, and CoreDNS instances. labdns never receives DNS-provider or
 etcd credentials and must not be granted Secret access. The official pinned
 DNSEndpoint CRD is test setup, not a production labdns manifest.
+
+Setup installs the standard Gateway API CRDs from the pinned Go dependency
+(v1.6.0) and enables Gateway support in the test Helm release. Each source kind
+uses a distinct hostname so another kind cannot mask missing publication.
+Gateway annotations supply inherited hostnames for TCPRoute and UDPRoute.
+Node and EndpointSlice changes use a 15-second target grace. The restart fixture
+uses a 30-second source grace so normal Deployment readiness probes leave time
+to observe retained records after recovery. Normal convergence stays at 10 seconds.
+Lifecycle fixtures use one IPv4 address because ExternalDNS v0.21.0's CoreDNS
+backend can leave stale keys when deleting a whole multi-target dual-stack name
+(tracked in Beads as `labdns-next-vj2`). Shared-source publication and target
+updates still assert exact A and AAAA sets for every source kind.
 
 ## Assertion rules
 
