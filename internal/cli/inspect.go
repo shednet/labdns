@@ -53,6 +53,8 @@ type sourceKindFilter string
 const (
 	sourceKindIngressFilter   sourceKindFilter = "Ingress"
 	sourceKindHTTPRouteFilter sourceKindFilter = "HTTPRoute"
+	sourceKindTCPRouteFilter  sourceKindFilter = "TCPRoute"
+	sourceKindUDPRouteFilter  sourceKindFilter = "UDPRoute"
 )
 
 type recordTypeFilter string
@@ -231,6 +233,10 @@ func (i inspector) sourceDetail(ctx context.Context, ref sourceRef) (sourceDetai
 		object = &networkingv1.Ingress{}
 	case "HTTPRoute":
 		object = &gatewayv1.HTTPRoute{}
+	case "TCPRoute":
+		object = &gatewayv1.TCPRoute{}
+	case "UDPRoute":
+		object = &gatewayv1.UDPRoute{}
 	default:
 		return sourceDetail{}, nil
 	}
@@ -273,7 +279,8 @@ func (i inspector) status(ctx context.Context, controllerNamespace, controllerNa
 			}
 			if controller.GatewayAPI {
 				for _, requirement := range []struct{ version, resource string }{
-					{gatewayv1.GroupVersion.String(), "httproutes"}, {gatewayv1.GroupVersion.String(), "gateways"},
+					{gatewayv1.GroupVersion.String(), "httproutes"}, {gatewayv1.GroupVersion.String(), "tcproutes"},
+					{gatewayv1.GroupVersion.String(), "udproutes"}, {gatewayv1.GroupVersion.String(), "gateways"},
 					{gatewayv1.GroupVersion.String(), "gatewayclasses"}, {gatewayv1beta1.GroupVersion.String(), "referencegrants"},
 				} {
 					available, discoveryErr := resourceAvailable(i.Discovery, requirement.version, requirement.resource)

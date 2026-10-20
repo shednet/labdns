@@ -39,6 +39,8 @@ type SourceKind string
 const (
 	SourceKindIngress   SourceKind = "Ingress"
 	SourceKindHTTPRoute SourceKind = "HTTPRoute"
+	SourceKindTCPRoute  SourceKind = "TCPRoute"
+	SourceKindUDPRoute  SourceKind = "UDPRoute"
 )
 
 type RecordType string
@@ -218,27 +220,109 @@ func ingressBackend(namespace string, backend *networkingv1.IngressBackend) (Bac
 	return Backend{Namespace: namespace, Name: backend.Service.Name}, true
 }
 
-func HTTPRouteProjection(ctx context.Context, reader client.Reader, route *gatewayv1.HTTPRoute, overrides []string, diagnostic DiagnosticFunc) ([]HostProjection, error) {
-	emit := diagnosticOnce(diagnostic)
-	all := map[Backend]struct{}{}
-	hasBackendReference := false
-	for _, rule := range route.Spec.Rules {
-		for _, ref := range rule.BackendRefs {
-			hasBackendReference = true
-			backend, ok, err := routeBackend(ctx, reader, route, ref.BackendObjectReference)
-			if err != nil {
-				return nil, err
+// RouteObject returns a new API object for a supported Gateway route kind.
+func RouteObject(kind SourceKind) client.Object {
+	switch kind {
+	case SourceKindHTTPRoute:
+		return &gatewayv1.HTTPRoute{}
+	case SourceKindTCPRoute:
+		return &gatewayv1.TCPRoute{}
+	case SourceKindUDPRoute:
+		return &gatewayv1.UDPRoute{}
+	default:
+		return nil
+	}
+}
+
+// RouteKind reports the labdns source kind for a supported Gateway route.
+func RouteKind(object client.Object) SourceKind {
+	switch object.(type) {
+	case *gatewayv1.HTTPRoute:
+		return SourceKindHTTPRoute
+	case *gatewayv1.TCPRoute:
+		return SourceKindTCPRoute
+	case *gatewayv1.UDPRoute:
+		return SourceKindUDPRoute
+	default:
+		return ""
+	}
+}
+
+// RouteParents returns the common parent references from a supported Gateway
+// route. Unsupported objects have no parents.
+func RouteParents(object client.Object) []gatewayv1.ParentReference {
+	switch route := object.(type) {
+	case *gatewayv1.HTTPRoute:
+		return route.Spec.ParentRefs
+	case *gatewayv1.TCPRoute:
+		return route.Spec.ParentRefs
+	case *gatewayv1.UDPRoute:
+		return route.Spec.ParentRefs
+	default:
+		return nil
+	}
+}
+
+// RouteBackendRefs returns each Service reference declared by the rules of a
+// supported Gateway route, in rule order.
+func RouteBackendRefs(object client.Object) []gatewayv1.BackendObjectReference {
+	var refs []gatewayv1.BackendObjectReference
+	switch route := object.(type) {
+	case *gatewayv1.HTTPRoute:
+		for _, rule := range route.Spec.Rules {
+			for _, ref := range rule.BackendRefs {
+				refs = append(refs, ref.BackendObjectReference)
 			}
-			if !ok {
-				emit(DiagnosticWarning, "UnsupportedBackend", fmt.Sprintf("HTTPRoute %s/%s backendRef %q is unsupported or lacks a ReferenceGrant", route.Namespace, route.Name, ref.Name))
-				continue
+		}
+	case *gatewayv1.TCPRoute:
+		for _, rule := range route.Spec.Rules {
+			for _, ref := range rule.BackendRefs {
+				refs = append(refs, ref.BackendObjectReference)
 			}
-			all[backend] = struct{}{}
+		}
+	case *gatewayv1.UDPRoute:
+		for _, rule := range route.Spec.Rules {
+			for _, ref := range rule.BackendRefs {
+				refs = append(refs, ref.BackendObjectReference)
+			}
 		}
 	}
+	return refs
+}
+
+// HTTPRouteProjection preserves the existing HTTP route projection API.
+func HTTPRouteProjection(ctx context.Context, reader client.Reader, route *gatewayv1.HTTPRoute, overrides []string, diagnostic DiagnosticFunc) ([]HostProjection, error) {
+	return RouteProjection(ctx, reader, route, overrides, diagnostic)
+}
+
+// RouteProjection projects the backends of a supported Gateway route onto its
+// publishable hostnames. HTTPRoute uses its spec hostnames when there are no
+// overrides; TCPRoute and UDPRoute rely only on inherited hostname overrides.
+func RouteProjection(ctx context.Context, reader client.Reader, route client.Object, overrides []string, diagnostic DiagnosticFunc) ([]HostProjection, error) {
+	kind := RouteKind(route)
+	if kind == "" {
+		return nil, fmt.Errorf("unsupported Gateway route object %T", route)
+	}
+
+	emit := diagnosticOnce(diagnostic)
+	all := map[Backend]struct{}{}
+	refs := RouteBackendRefs(route)
+	for _, ref := range refs {
+		backend, ok, err := routeBackend(ctx, reader, route, kind, ref)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			emit(DiagnosticWarning, "UnsupportedBackend", fmt.Sprintf("%s %s/%s backendRef %q is unsupported or lacks a ReferenceGrant", kind, route.GetNamespace(), route.GetName(), ref.Name))
+			continue
+		}
+		all[backend] = struct{}{}
+	}
+	hasBackendReference := len(refs) != 0
 	hostnames := overrides
-	if len(hostnames) == 0 {
-		for _, hostname := range route.Spec.Hostnames {
+	if len(hostnames) == 0 && kind == SourceKindHTTPRoute {
+		httpRoute := route.(*gatewayv1.HTTPRoute)
+		for _, hostname := range httpRoute.Spec.Hostnames {
 			normalized, err := NormalizeHostname(string(hostname))
 			if err != nil {
 				return nil, err
@@ -248,10 +332,10 @@ func HTTPRouteProjection(ctx context.Context, reader client.Reader, route *gatew
 		hostnames = sortedUnique(hostnames)
 	}
 	if len(hostnames) == 0 {
-		emit(DiagnosticNormal, "NoPublishableHostname", fmt.Sprintf("HTTPRoute %s/%s has no publishable hostname", route.Namespace, route.Name))
+		emit(DiagnosticNormal, "NoPublishableHostname", fmt.Sprintf("%s %s/%s has no publishable hostname", kind, route.GetNamespace(), route.GetName()))
 	}
 	if !hasBackendReference {
-		emit(DiagnosticNormal, "NoBackendReferences", fmt.Sprintf("HTTPRoute %s/%s has no backend references", route.Namespace, route.Name))
+		emit(DiagnosticNormal, "NoBackendReferences", fmt.Sprintf("%s %s/%s has no backend references", kind, route.GetNamespace(), route.GetName()))
 	}
 	if len(all) == 0 {
 		return nil, nil
@@ -264,27 +348,27 @@ func HTTPRouteProjection(ctx context.Context, reader client.Reader, route *gatew
 	return result, nil
 }
 
-func routeBackend(ctx context.Context, reader client.Reader, route *gatewayv1.HTTPRoute, ref gatewayv1.BackendObjectReference) (Backend, bool, error) {
+func routeBackend(ctx context.Context, routeReader client.Reader, route client.Object, kind SourceKind, ref gatewayv1.BackendObjectReference) (Backend, bool, error) {
 	if ref.Group != nil && string(*ref.Group) != "" || ref.Kind != nil && string(*ref.Kind) != serviceKind {
 		return Backend{}, false, nil
 	}
-	namespace := route.Namespace
+	namespace := route.GetNamespace()
 	if ref.Namespace != nil {
 		namespace = string(*ref.Namespace)
 	}
 	backend := Backend{Namespace: namespace, Name: string(ref.Name)}
-	if namespace == route.Namespace {
+	if namespace == route.GetNamespace() {
 		return backend, true, nil
 	}
 	var grants gatewayv1beta1.ReferenceGrantList
-	if err := reader.List(ctx, &grants, client.InNamespace(namespace)); err != nil {
+	if err := routeReader.List(ctx, &grants, client.InNamespace(namespace)); err != nil {
 		return Backend{}, false, fmt.Errorf("list ReferenceGrants in %s: %w", namespace, err)
 	}
 	for i := range grants.Items {
 		grant := &grants.Items[i]
 		fromOK := false
 		for _, from := range grant.Spec.From {
-			if string(from.Group) == gatewayv1.GroupName && string(from.Kind) == "HTTPRoute" && string(from.Namespace) == route.Namespace {
+			if string(from.Group) == gatewayv1.GroupName && string(from.Kind) == string(kind) && string(from.Namespace) == route.GetNamespace() {
 				fromOK = true
 				break
 			}

@@ -36,9 +36,11 @@ labdns list --namespace app --provider www --record-type A
 labdns list --output json | jq '.items[] | select(.externalDNSState != "observed")'
 ```
 
-`--source-kind` accepts `Ingress` or `HTTPRoute`, and `--record-type` accepts
-`A` or `AAAA`; values are case-insensitive. Other values are rejected instead
-of being treated as filters that happen to match no records.
+`--source-kind` accepts `Ingress`, `HTTPRoute`, `TCPRoute`, or `UDPRoute`, and
+`--record-type` accepts `A` or `AAAA`; values are case-insensitive. Other
+values are rejected instead of being treated as filters that happen to match
+no records. Source inspection resolves each Gateway route by its recorded kind
+and name.
 
 Show every provider/source publishing one DNS name:
 

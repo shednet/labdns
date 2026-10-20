@@ -29,9 +29,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	clienttesting "k8s.io/client-go/testing"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	externaldnsv1alpha1 "sigs.k8s.io/external-dns/apis/v1alpha1"
 	"sigs.k8s.io/external-dns/endpoint"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	labdnsv1alpha1 "github.com/shednet/labdns/api/v1alpha1"
 	"github.com/shednet/labdns/internal/dnsendpoint"
@@ -96,6 +99,32 @@ func TestDetailsCorrelatesProviderAndSource(t *testing.T) {
 	}
 	if len(details.Items) != 1 || !details.Items[0].Provider.Found || details.Items[0].Provider.IPv4Label != "example.com/ip" {
 		t.Fatalf("details = %#v", details)
+	}
+}
+
+func TestSourceDetailSupportsAllGatewayRouteKinds(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := gatewayv1.Install(scheme); err != nil {
+		t.Fatal(err)
+	}
+	objects := []client.Object{
+		&gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "same", UID: "http-uid"}},
+		&gatewayv1.TCPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "same", UID: "tcp-uid"}},
+		&gatewayv1.UDPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "same", UID: "udp-uid"}},
+	}
+	inspector := inspector{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()}
+	for _, test := range []struct{ kind, uid string }{
+		{kind: "HTTPRoute", uid: "http-uid"},
+		{kind: "TCPRoute", uid: "tcp-uid"},
+		{kind: "UDPRoute", uid: "udp-uid"},
+	} {
+		t.Run(test.kind, func(t *testing.T) {
+			got, err := inspector.sourceDetail(context.Background(), sourceRef{Kind: test.kind, Namespace: "app", Name: "same", UID: test.uid})
+			if err != nil || !got.Found || !got.UIDMatches {
+				t.Fatalf("sourceDetail = %#v, %v; want existing source with matching UID", got, err)
+			}
+		})
 	}
 }
 
@@ -267,6 +296,27 @@ func TestCommandRejectsInvalidRecordFiltersBeforeKubernetesAccess(t *testing.T) 
 	}
 }
 
+func TestSourceKindFiltersAcceptAllSupportedKinds(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct{ value, want string }{
+		{value: "Ingress", want: "Ingress"},
+		{value: "HTTPRoute", want: "HTTPRoute"},
+		{value: "TCPRoute", want: "TCPRoute"},
+		{value: "UDPRoute", want: "UDPRoute"},
+		{value: "tcproute", want: "TCPRoute"},
+		{value: "udproute", want: "UDPRoute"},
+	} {
+		filters := recordFilterOptions{sourceKind: test.value}
+		if err := filters.validate(); err != nil {
+			t.Errorf("source kind %q rejected: %v", test.value, err)
+			continue
+		}
+		if got := string(filters.filters("").SourceKind); got != test.want {
+			t.Errorf("source kind %q produced filter %q, want %q", test.value, got, test.want)
+		}
+	}
+}
+
 func TestStatusReportsHealthyControllerAndPrerequisites(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
@@ -294,5 +344,51 @@ func TestStatusReportsHealthyControllerAndPrerequisites(t *testing.T) {
 	status, failed := inspector.status(context.Background(), "", "")
 	if failed || status.Overall != "healthy" || len(status.Controllers) != 1 || status.Controllers[0].ReadyPods != 1 {
 		t.Fatalf("status = %#v, failed = %t", status, failed)
+	}
+}
+
+func TestStatusReportsMissingTCPAndUDPRoutePrerequisites(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{
+		corev1.AddToScheme, appsv1.AddToScheme, externaldnsv1alpha1.AddToScheme, labdnsv1alpha1.AddToScheme,
+	} {
+		if err := add(scheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	replicas := int32(1)
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "labdns-system", Name: "labdns", Labels: map[string]string{"app.kubernetes.io/name": "labdns"}},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas, Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "labdns"}},
+			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "manager", Args: []string{"--enable-gateway-api"}}}}},
+		},
+		Status: appsv1.DeploymentStatus{AvailableReplicas: 1},
+	}
+	discoveryClient := &fakediscovery.FakeDiscovery{Fake: &clienttesting.Fake{Resources: []*metav1.APIResourceList{
+		{GroupVersion: labdnsv1alpha1.GroupVersion.String(), APIResources: []metav1.APIResource{{Name: "dnsproviders"}}},
+		{GroupVersion: externaldnsv1alpha1.GroupVersion.String(), APIResources: []metav1.APIResource{{Name: "dnsendpoints"}}},
+		{GroupVersion: gatewayv1.GroupVersion.String(), APIResources: []metav1.APIResource{
+			{Name: "httproutes"}, {Name: "gateways"}, {Name: "gatewayclasses"},
+		}},
+		{GroupVersion: gatewayv1beta1.GroupVersion.String(), APIResources: []metav1.APIResource{{Name: "referencegrants"}}},
+	}}}
+	inspector := inspector{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(deployment).Build(), Discovery: discoveryClient}
+	status, failed := inspector.status(context.Background(), "", "")
+	if !failed || status.Overall != "unhealthy" {
+		t.Fatalf("status = %#v, failed = %t; want missing route prerequisites to fail health", status, failed)
+	}
+	for _, resource := range []string{"tcproutes", "udproutes"} {
+		found := false
+		for _, warning := range status.Warnings {
+			if strings.Contains(warning, resource+" is unavailable") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("warnings = %v, want unavailable %s reported", status.Warnings, resource)
+		}
 	}
 }

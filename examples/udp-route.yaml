@@ -1,0 +1,16 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: UDPRoute
+metadata:
+  name: dns
+  namespace: applications
+  annotations:
+    labdns.shednet.dev/enabled: "true"
+    labdns.shednet.dev/providers: www
+    labdns.shednet.dev/hostnames: dns.example.com
+spec:
+  parentRefs:
+  - name: public
+  rules:
+  - backendRefs:
+    - name: dns
+      port: 5353

@@ -31,8 +31,9 @@ helm upgrade --install labdns oci://ghcr.io/shednet/charts/labdns \
 kubectl rollout status deployment/labdns-labdns --namespace labdns-system
 ```
 
-Gateway API sources are optional and require additional CRDs and RBAC. Start
-with an Ingress here; enable Gateway API later through the
+Gateway API sources (HTTPRoute, TCPRoute, and UDPRoute) are optional and require
+Gateway API v1.6.0 CRDs and additional RBAC. Start with an Ingress here; enable
+Gateway API later through the
 [installation guide](installation.md) if needed.
 
 ## Configure ExternalDNS for labdns

@@ -263,6 +263,10 @@ func diagnosticSourceKeyFor(object client.Object) diagnosticSourceKey {
 			kind = string(sourceKindIngress)
 		case *gatewayv1.HTTPRoute:
 			kind = string(sourceKindHTTPRoute)
+		case *gatewayv1.TCPRoute:
+			kind = string(sourceKindTCPRoute)
+		case *gatewayv1.UDPRoute:
+			kind = string(sourceKindUDPRoute)
 		case *corev1.Service:
 			kind = "Service"
 		}

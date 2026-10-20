@@ -1,7 +1,7 @@
 # Configuration
 
-labdns watches Kubernetes sources, resolves the Nodes serving their backend
-Services, and creates one `DNSEndpoint` for each source and selected
+labdns watches Ingress and Gateway API route sources, resolves the Nodes
+serving their backend Services, and creates one `DNSEndpoint` for each source and selected
 `DNSProvider`. A source is managed only when its resolved annotations include
 both `labdns.shednet.dev/enabled: "true"` and at least one provider name.
 
@@ -22,20 +22,27 @@ on the Ingress taking precedence. Selection uses `spec.ingressClassName`, or
 `kubernetes.io/ingress.class` when the field is unset. If neither is present,
 only Ingress annotations apply.
 
-HTTPRoute watching is opt-in with `--enable-gateway-api`, the
+HTTPRoute, TCPRoute, and UDPRoute watching is opt-in with `--enable-gateway-api`, the
 `config/overlays/gateway-api` Kustomize overlay, or the Helm value
-`gatewayAPI.enabled=true`. Hostnames come from `spec.hostnames`, and all
-supported Service backendRefs are applied to each hostname. A cross-namespace
-Service reference is used only when a `ReferenceGrant` in the Service namespace
-permits the route namespace to reference that Service. Unsupported or
-ungranted backends are skipped with a Warning event.
+`gatewayAPI.enabled=true`. Install Gateway API v1.6.0 standard CRDs first;
+startup requires the HTTPRoute, TCPRoute, UDPRoute, Gateway, GatewayClass, and
+ReferenceGrant resources. HTTPRoute hostnames come from `spec.hostnames`, and all
+supported Service backendRefs are applied to each hostname. TCPRoute and
+UDPRoute use the effective `labdns.shednet.dev/hostnames` annotation because
+those route kinds have no hostname field. If that annotation does not resolve
+to a usable hostname, labdns emits `NoPublishableHostname` and creates no
+records. A cross-namespace Service reference is used only when a
+`ReferenceGrant` in the Service namespace permits that specific route kind and
+namespace to reference the Service. Unsupported or ungranted backends are
+skipped with a Warning event.
 
-HTTPRoute annotations inherit in this order: `GatewayClass`, `Gateway`, then
-`HTTPRoute`. Only Gateway parentRefs are considered. When a route has multiple
-supported parents, every parent chain must resolve to identical labdns and
-ExternalDNS annotations; otherwise reconciliation fails with an
+Gateway route annotations inherit in this order: `GatewayClass`, `Gateway`,
+then the route. Only Gateway parentRefs are considered. When a route has
+multiple supported parents, every parent chain must resolve to identical
+labdns and ExternalDNS annotations; otherwise reconciliation fails with an
 `AmbiguousParents` Warning event. A route with no supported parent uses only
-its own annotations.
+its own annotations. HTTPRoute hostnames continue to come from
+`spec.hostnames`, with the `hostnames` annotation replacing them when set.
 
 Only annotations under `labdns.shednet.dev/` and
 `external-dns.alpha.kubernetes.io/` participate in inheritance. At each level,
@@ -141,7 +148,7 @@ kubectl label node worker-1 \
 ## Publication diagnostics
 
 labdns reports skipped publication through Kubernetes events on the Ingress or
-HTTPRoute and structured manager logs. Logs include the source kind, namespace,
+Gateway route and structured manager logs. Logs include the source kind, namespace,
 name, UID, reason, and message. The message identifies the affected provider,
 Service, Node, label, or address family where applicable.
 
@@ -155,7 +162,7 @@ Service, Node, label, or address family where applicable.
 | `NoPublishableHostname` | Normal / info | The source has no usable hostname or hostname override. Gateway listener hostnames are not used as a fallback. |
 | `IngressRuleWithoutHostname` | Normal / info | A hostless Ingress rule's Service backends are ignored even when hostname overrides are present. |
 | `NoBackendReferences` | Normal / info | The source has no backend references, as with a redirect-only HTTPRoute. |
-| `UnsupportedBackend` | Warning / warn | A backend is unsupported; HTTPRoute cross-namespace backends also require a ReferenceGrant. |
+| `UnsupportedBackend` | Warning / warn | A backend is unsupported; cross-namespace Gateway route backends also require a matching ReferenceGrant. |
 | `TLSHostWithoutBackend` | Warning / warn | An Ingress TLS-only hostname has no matching rule or supported default backend. |
 | `NoProvidersSelected` | Warning / warn | The source is enabled but its effective provider selection is empty. |
 

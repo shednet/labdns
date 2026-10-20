@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -159,88 +160,108 @@ func (r *ingressReconciler) diagnosticEmitter() *diagnosticEmitter {
 	return r.diagnostics
 }
 
-type httpRouteReconciler struct {
+type routeReconciler struct {
 	client.Client
 	Recorder      events.EventRecorder
 	Output        source.Output
 	Resolver      source.Resolver
 	Metrics       *Metrics
+	Kind          source.SourceKind
 	diagnostics   *diagnosticEmitter
 	diagnosticsMu sync.Mutex
 }
 
-func (r *httpRouteReconciler) Reconcile(ctx context.Context, request ctrl.Request) (result ctrl.Result, reconcileErr error) {
+// Keep the HTTPRoute name as an alias for existing focused tests and callers.
+// Production setup creates one routeReconciler per Gateway API route kind.
+type httpRouteReconciler = routeReconciler
+
+func (r *routeReconciler) routeKind() source.SourceKind {
+	if r.Kind != "" {
+		return r.Kind
+	}
+	return sourceKindHTTPRoute
+}
+
+func (r *routeReconciler) Reconcile(ctx context.Context, request ctrl.Request) (result ctrl.Result, reconcileErr error) {
 	started := time.Now()
-	defer func() { r.Metrics.Observe("httproute", started, reconcileErr) }()
+	kind := r.routeKind()
+	metricName := strings.ToLower(string(kind))
+	defer func() { r.Metrics.Observe(metricName, started, reconcileErr) }()
 	metricKey := request.Namespace + "/" + request.Name
-	var route gatewayv1.HTTPRoute
-	if err := r.Get(ctx, request.NamespacedName, &route); err != nil {
+	route := source.RouteObject(kind)
+	if route == nil {
+		return ctrl.Result{}, fmt.Errorf("unsupported Gateway route kind %q", kind)
+	}
+	if err := r.Get(ctx, request.NamespacedName, route); err != nil {
 		if apierrors.IsNotFound(err) {
-			r.diagnosticEmitter().deleteSource(string(sourceKindHTTPRoute), request.Namespace, request.Name)
-			r.Metrics.SetSource(string(sourceKindHTTPRoute), metricKey, false)
-			err := r.Output.Apply(ctx, source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: sourceKindHTTPRoute, Namespace: request.Namespace, Name: request.Name}, nil)
+			r.diagnosticEmitter().deleteSource(string(kind), request.Namespace, request.Name)
+			r.Metrics.SetSource(string(kind), metricKey, false)
+			err := r.Output.Apply(ctx, source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: kind, Namespace: request.Namespace, Name: request.Name}, nil)
 			return ctrl.Result{}, terminalOutputError(err)
 		}
 		return ctrl.Result{}, err
 	}
-	diagnostics := r.diagnosticEmitter().begin(&route, r.Recorder)
+	if actualKind := source.RouteKind(route); actualKind != kind {
+		return ctrl.Result{}, fmt.Errorf("route controller for %s read unexpected object kind %s", kind, actualKind)
+	}
+	diagnostics := r.diagnosticEmitter().begin(route, r.Recorder)
 	ctx = diagnostics.context(ctx)
 	defer func() { diagnostics.finish(reconcileErr == nil) }()
-	annotations, err := r.routeAnnotations(ctx, &route)
+	annotations, err := r.routeAnnotations(ctx, route)
 	if err != nil {
 		return ctrl.Result{}, terminalSourceError(err)
 	}
 	parsed, err := source.ParseAnnotations(annotations)
 	if err != nil {
-		r.warning(ctx, &route, "InvalidAnnotations", err.Error())
+		r.warning(ctx, route, "InvalidAnnotations", err.Error())
 		return ctrl.Result{}, terminalSourceError(err)
 	}
-	identity := source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: sourceKindHTTPRoute, Namespace: route.Namespace, Name: route.Name, UID: route.UID}
-	r.Metrics.SetSource(string(sourceKindHTTPRoute), metricKey, parsed.Enabled && len(parsed.Providers) != 0)
+	identity := source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: kind, Namespace: route.GetNamespace(), Name: route.GetName(), UID: route.GetUID()}
+	r.Metrics.SetSource(string(kind), metricKey, parsed.Enabled && len(parsed.Providers) != 0)
 	if !parsed.Enabled || len(parsed.Providers) == 0 {
 		if parsed.Enabled && len(parsed.Providers) == 0 {
-			r.diagnose(ctx, &route, string(source.DiagnosticWarning), "NoProvidersSelected", "HTTPRoute is enabled but selects no DNSProviders")
+			r.diagnose(ctx, route, string(source.DiagnosticWarning), "NoProvidersSelected", fmt.Sprintf("%s is enabled but selects no DNSProviders", kind))
 		}
 		if err := r.Output.Apply(ctx, identity, nil); err != nil {
-			r.warning(ctx, &route, "DNSEndpointWriteFailed", err.Error())
+			r.warning(ctx, route, "DNSEndpointWriteFailed", err.Error())
 			return ctrl.Result{}, terminalOutputError(err)
 		}
 		return ctrl.Result{}, nil
 	}
-	projection, err := source.HTTPRouteProjection(ctx, r.Client, &route, parsed.Hostnames, func(severity, reason, message string) {
-		r.diagnose(ctx, &route, severity, reason, message)
+	projection, err := source.RouteProjection(ctx, r.Client, route, parsed.Hostnames, func(severity, reason, message string) {
+		r.diagnose(ctx, route, severity, reason, message)
 	})
 	if err != nil {
-		r.warning(ctx, &route, "ResolutionFailed", err.Error())
+		r.warning(ctx, route, "ResolutionFailed", err.Error())
 		return ctrl.Result{}, terminalSourceError(err)
 	}
 	providers, err := loadProviders(ctx, r.Client, parsed.Providers, func(severity, reason, message string) {
-		r.diagnose(ctx, &route, severity, reason, message)
+		r.diagnose(ctx, route, severity, reason, message)
 	})
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	publications, err := r.Resolver.Publications(ctx, projection, providers, publicationOptions(parsed), func(severity, reason, message string) {
-		r.diagnose(ctx, &route, severity, reason, message)
+		r.diagnose(ctx, route, severity, reason, message)
 	})
 	if err != nil {
-		r.warning(ctx, &route, resolutionWarningReason(err), err.Error())
+		r.warning(ctx, route, resolutionWarningReason(err), err.Error())
 		return ctrl.Result{}, terminalSourceError(err)
 	}
 	if err := r.Output.Apply(ctx, identity, publications); err != nil {
-		r.warning(ctx, &route, "DNSEndpointWriteFailed", err.Error())
+		r.warning(ctx, route, "DNSEndpointWriteFailed", err.Error())
 		return ctrl.Result{}, terminalOutputError(err)
 	}
 	return ctrl.Result{}, nil
 }
 
-func (r *httpRouteReconciler) routeAnnotations(ctx context.Context, route *gatewayv1.HTTPRoute) (map[string]string, error) {
+func (r *routeReconciler) routeAnnotations(ctx context.Context, route client.Object) (map[string]string, error) {
 	chains := []map[string]string{}
-	for _, ref := range route.Spec.ParentRefs {
+	for _, ref := range source.RouteParents(route) {
 		if ref.Group != nil && string(*ref.Group) != gatewayv1.GroupName || ref.Kind != nil && string(*ref.Kind) != "Gateway" {
 			continue
 		}
-		namespace := route.Namespace
+		namespace := route.GetNamespace()
 		if ref.Namespace != nil {
 			namespace = string(*ref.Namespace)
 		}
@@ -270,10 +291,10 @@ func (r *httpRouteReconciler) routeAnnotations(ctx context.Context, route *gatew
 			}
 			return nil, wrapped
 		}
-		chains = append(chains, source.MergeAnnotations(class.Annotations, gateway.Annotations, route.Annotations))
+		chains = append(chains, source.MergeAnnotations(class.Annotations, gateway.Annotations, route.GetAnnotations()))
 	}
 	if len(chains) == 0 {
-		return source.MergeAnnotations(route.Annotations), nil
+		return source.MergeAnnotations(route.GetAnnotations()), nil
 	}
 	for _, chain := range chains[1:] {
 		if !maps.Equal(chains[0], chain) {
@@ -285,15 +306,15 @@ func (r *httpRouteReconciler) routeAnnotations(ctx context.Context, route *gatew
 	return chains[0], nil
 }
 
-func (r *httpRouteReconciler) warning(ctx context.Context, object client.Object, reason, message string) {
+func (r *routeReconciler) warning(ctx context.Context, object client.Object, reason, message string) {
 	r.diagnose(ctx, object, string(source.DiagnosticWarning), reason, message)
 }
 
-func (r *httpRouteReconciler) diagnose(ctx context.Context, object client.Object, severity, reason, message string) {
+func (r *routeReconciler) diagnose(ctx context.Context, object client.Object, severity, reason, message string) {
 	reportSourceDiagnostic(ctx, object, r.Recorder, r.diagnosticEmitter(), severity, reason, message)
 }
 
-func (r *httpRouteReconciler) diagnosticEmitter() *diagnosticEmitter {
+func (r *routeReconciler) diagnosticEmitter() *diagnosticEmitter {
 	r.diagnosticsMu.Lock()
 	defer r.diagnosticsMu.Unlock()
 	if r.diagnostics == nil {

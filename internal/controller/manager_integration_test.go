@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -183,7 +184,7 @@ func newManagerWatchFixture(t *testing.T) *managerWatchFixture {
 	// shutdown, so the manager is stopped before cleanup talks to the API.
 	t.Cleanup(func() {
 		cleanupSharedNamespaces(t, "app", "backend")
-		cleanupSharedClusterObjects(t, []string{"www", "encoded-v6"}, []string{"public"}, []string{"class", "second"})
+		cleanupSharedClusterObjects(t, []string{"www", "encoded-v6"}, []string{"public"}, []string{"class", "second", "transport"})
 		cleanupSharedNodes(t, "worker", "worker-two")
 	})
 	mgr, err := ctrl.NewManager(config, ctrl.Options{
@@ -491,6 +492,154 @@ func exerciseManagerWatchGateway(t *testing.T, f *managerWatchFixture) {
 	exerciseManagerWatchGatewaySources(t, f)
 	exerciseManagerWatchGatewayCrossNamespace(t, f)
 	exerciseManagerWatchGatewayEvents(t, f)
+	exerciseManagerWatchTCPUDPRouteKinds(t, f)
+}
+
+func exerciseManagerWatchTCPUDPRouteKinds(t *testing.T, f *managerWatchFixture) {
+	t.Helper()
+	ctx, direct, output := f.ctx, f.direct, f.output
+	createManagerWatchObject(t, ctx, direct, &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "transport", Annotations: map[string]string{
+			source.EnabledAnnotation: "true", source.ProvidersAnnotation: "www",
+			source.HostnamesAnnotation:                "transport.example.com",
+			source.ExternalDNSPrefix + "class-marker": "class",
+		}},
+		Spec: gatewayv1.GatewayClassSpec{ControllerName: "example.test/controller"},
+	})
+	createManagerWatchObject(t, ctx, direct, &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "transport", Namespace: "app", Annotations: map[string]string{source.ExternalDNSPrefix + "gateway-marker": "gateway"}},
+		Spec: gatewayv1.GatewaySpec{GatewayClassName: "transport", Listeners: []gatewayv1.Listener{
+			{Name: "tcp", Protocol: gatewayv1.TCPProtocolType, Port: 9000},
+			{Name: "udp", Protocol: gatewayv1.UDPProtocolType, Port: 9001},
+		}},
+	})
+	port80 := gatewayv1.PortNumber(80)
+	parentRefs := []gatewayv1.ParentReference{{Name: "transport"}}
+	createManagerWatchObject(t, ctx, direct, &gatewayv1.TCPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "transport-tcp", Namespace: "app"},
+		Spec: gatewayv1.TCPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: parentRefs},
+			Rules:           []gatewayv1.TCPRouteRule{{BackendRefs: []gatewayv1.BackendRef{{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "api", Port: &port80}}}}},
+		},
+	})
+	createManagerWatchObject(t, ctx, direct, &gatewayv1.UDPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "transport-udp", Namespace: "app"},
+		Spec: gatewayv1.UDPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: parentRefs},
+			Rules:           []gatewayv1.UDPRouteRule{{BackendRefs: []gatewayv1.BackendRef{{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "api", Port: &port80}}}}},
+		},
+	})
+	want := func(hostname, gatewayMarker string) func([]source.Publication) bool {
+		targets := hostTargetsAre(map[string][]string{hostname: {"192.0.2.9"}})
+		return func(publications []source.Publication) bool {
+			return targets(publications) && metadataAnnotationIs(source.ExternalDNSPrefix+"class-marker", "class")(publications) &&
+				metadataAnnotationIs(source.ExternalDNSPrefix+"gateway-marker", gatewayMarker)(publications)
+		}
+	}
+	waitForRouteOutputs(t, output, map[string]func([]source.Publication) bool{
+		"TCPRoute/transport-tcp": want("transport.example.com", "gateway"),
+		"UDPRoute/transport-udp": want("transport.example.com", "gateway"),
+	})
+
+	// Parent and parent-class changes must requeue each kind and refresh
+	// inherited hostnames and metadata.
+	output.drain()
+	class := &gatewayv1.GatewayClass{}
+	if err := direct.Get(ctx, client.ObjectKey{Name: "transport"}, class); err != nil {
+		t.Fatal(err)
+	}
+	class.Annotations[source.HostnamesAnnotation] = "transport-updated.example.com"
+	class.Annotations[source.ExternalDNSPrefix+"class-marker"] = "updated"
+	if err := direct.Update(ctx, class); err != nil {
+		t.Fatal(err)
+	}
+	updatedHost := hostTargetsAre(map[string][]string{"transport-updated.example.com": {"192.0.2.9"}})
+	classUpdated := func(publications []source.Publication) bool {
+		return updatedHost(publications) && metadataAnnotationIs(source.ExternalDNSPrefix+"class-marker", "updated")(publications) &&
+			metadataAnnotationIs(source.ExternalDNSPrefix+"gateway-marker", "gateway")(publications)
+	}
+	waitForRouteOutputs(t, output, map[string]func([]source.Publication) bool{
+		"TCPRoute/transport-tcp": classUpdated,
+		"UDPRoute/transport-udp": classUpdated,
+	})
+
+	output.drain()
+	gateway := &gatewayv1.Gateway{}
+	if err := direct.Get(ctx, client.ObjectKey{Namespace: "app", Name: "transport"}, gateway); err != nil {
+		t.Fatal(err)
+	}
+	gateway.Annotations[source.ExternalDNSPrefix+"gateway-marker"] = "updated"
+	if err := direct.Update(ctx, gateway); err != nil {
+		t.Fatal(err)
+	}
+	gatewayUpdated := func(publications []source.Publication) bool {
+		return updatedHost(publications) && metadataAnnotationIs(source.ExternalDNSPrefix+"class-marker", "updated")(publications) &&
+			metadataAnnotationIs(source.ExternalDNSPrefix+"gateway-marker", "updated")(publications)
+	}
+	waitForRouteOutputs(t, output, map[string]func([]source.Publication) bool{
+		"TCPRoute/transport-tcp": gatewayUpdated,
+		"UDPRoute/transport-udp": gatewayUpdated,
+	})
+
+	// Service, EndpointSlice, Node, and DNSProvider changes all map back to
+	// both route kinds through their own indexes and watches.
+	output.drain()
+	service := &corev1.Service{}
+	if err := direct.Get(ctx, client.ObjectKey{Namespace: "app", Name: "api"}, service); err != nil {
+		t.Fatal(err)
+	}
+	service.Annotations = map[string]string{"test.example/service-change": "true"}
+	if err := direct.Update(ctx, service); err != nil {
+		t.Fatal(err)
+	}
+	waitForRouteOutputs(t, output, map[string]func([]source.Publication) bool{
+		"TCPRoute/transport-tcp": updatedHost,
+		"UDPRoute/transport-udp": updatedHost,
+	})
+
+	output.drain()
+	slice := &discoveryv1.EndpointSlice{}
+	if err := direct.Get(ctx, client.ObjectKey{Namespace: "app", Name: "api"}, slice); err != nil {
+		t.Fatal(err)
+	}
+	slice.Annotations = map[string]string{"test.example/slice-change": "true"}
+	if err := direct.Update(ctx, slice); err != nil {
+		t.Fatal(err)
+	}
+	waitForRouteOutputs(t, output, map[string]func([]source.Publication) bool{
+		"TCPRoute/transport-tcp": updatedHost,
+		"UDPRoute/transport-udp": updatedHost,
+	})
+
+	output.drain()
+	node := &corev1.Node{}
+	if err := direct.Get(ctx, client.ObjectKey{Name: f.nodeName}, node); err != nil {
+		t.Fatal(err)
+	}
+	node.Labels["network.example/ip-next"] = "192.0.2.8"
+	if err := direct.Update(ctx, node); err != nil {
+		t.Fatal(err)
+	}
+	newTarget := hostTargetsAre(map[string][]string{"transport-updated.example.com": {"192.0.2.8"}})
+	waitForRouteOutputs(t, output, map[string]func([]source.Publication) bool{
+		"TCPRoute/transport-tcp": newTarget,
+		"UDPRoute/transport-udp": newTarget,
+	})
+
+	output.drain()
+	provider := &labdnsv1alpha1.DNSProvider{}
+	if err := direct.Get(ctx, client.ObjectKey{Name: "www"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Spec.IPSources.IPv4.NodeLabel = "network.example/ip"
+	if err := direct.Update(ctx, provider); err != nil {
+		t.Fatal(err)
+	}
+	providerTarget := hostTargetsAre(map[string][]string{"transport-updated.example.com": {"192.0.2.2"}})
+	waitForRouteOutputs(t, output, map[string]func([]source.Publication) bool{
+		"TCPRoute/transport-tcp": providerTarget,
+		"UDPRoute/transport-udp": providerTarget,
+	})
 }
 
 func exerciseManagerWatchGatewaySources(t *testing.T, f *managerWatchFixture) {
@@ -592,6 +741,26 @@ func exerciseManagerWatchGatewayCrossNamespace(t *testing.T, f *managerWatchFixt
 	output.wait(t, "HTTPRoute", "cross", func(publications []source.Publication) bool {
 		return len(publications) == 1 && len(publications[0].Records) == 0
 	})
+	backendRef := gatewayv1.BackendObjectReference{Name: "cross", Namespace: ptr.To(gatewayv1.Namespace("backend")), Port: &port80}
+	createManagerWatchObject(t, ctx, direct, &gatewayv1.TCPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "tcp-cross", Namespace: "app", Annotations: map[string]string{
+			source.EnabledAnnotation: "true", source.ProvidersAnnotation: "www", source.HostnamesAnnotation: "tcp-cross.example.com",
+		}},
+		Spec: gatewayv1.TCPRouteSpec{Rules: []gatewayv1.TCPRouteRule{{BackendRefs: []gatewayv1.BackendRef{{BackendObjectReference: backendRef}}}}},
+	})
+	createManagerWatchObject(t, ctx, direct, &gatewayv1.UDPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "udp-cross", Namespace: "app", Annotations: map[string]string{
+			source.EnabledAnnotation: "true", source.ProvidersAnnotation: "www", source.HostnamesAnnotation: "udp-cross.example.com",
+		}},
+		Spec: gatewayv1.UDPRouteSpec{Rules: []gatewayv1.UDPRouteRule{{BackendRefs: []gatewayv1.BackendRef{{BackendObjectReference: backendRef}}}}},
+	})
+	empty := func(publications []source.Publication) bool {
+		return len(publications) == 1 && len(publications[0].Records) == 0
+	}
+	waitForRouteOutputs(t, output, map[string]func([]source.Publication) bool{
+		"TCPRoute/tcp-cross": empty,
+		"UDPRoute/udp-cross": empty,
+	})
 	createManagerWatchObject(t, ctx, direct, &gatewayv1beta1.ReferenceGrant{
 		ObjectMeta: metav1.ObjectMeta{Name: "allow-cross", Namespace: "backend"},
 		Spec: gatewayv1beta1.ReferenceGrantSpec{
@@ -601,17 +770,57 @@ func exerciseManagerWatchGatewayCrossNamespace(t *testing.T, f *managerWatchFixt
 	})
 	output.wait(t, "HTTPRoute", "cross", targetIs("192.0.2.9"))
 
+	// ReferenceGrant route kinds are matched exactly. The TCP-only grant must
+	// allow TCPRoute while leaving the otherwise identical UDPRoute unresolved.
 	output.drain()
 	grant := &gatewayv1beta1.ReferenceGrant{}
 	if err := direct.Get(ctx, client.ObjectKey{Namespace: "backend", Name: "allow-cross"}, grant); err != nil {
 		t.Fatal(err)
 	}
+	grant.Spec.From[0].Kind = "TCPRoute"
+	if err := direct.Update(ctx, grant); err != nil {
+		t.Fatal(err)
+	}
+	waitForRouteOutputs(t, output, map[string]func([]source.Publication) bool{
+		"TCPRoute/tcp-cross": targetIs("192.0.2.9"),
+		"UDPRoute/udp-cross": empty,
+	})
+
+	output.drain()
+	grant.Spec.From[0].Kind = "UDPRoute"
+	if err := direct.Update(ctx, grant); err != nil {
+		t.Fatal(err)
+	}
+	waitForRouteOutputs(t, output, map[string]func([]source.Publication) bool{
+		"TCPRoute/tcp-cross": empty,
+		"UDPRoute/udp-cross": targetIs("192.0.2.9"),
+	})
+
+	output.drain()
 	if err := direct.Delete(ctx, grant); err != nil {
 		t.Fatal(err)
 	}
 	output.wait(t, "HTTPRoute", "cross", func(publications []source.Publication) bool {
 		return len(publications) == 1 && len(publications[0].Records) == 0
 	})
+}
+
+func waitForRouteOutputs(t *testing.T, output *watchOutput, expected map[string]func([]source.Publication) bool) {
+	t.Helper()
+	pending := maps.Clone(expected)
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	for len(pending) != 0 {
+		select {
+		case event := <-output.events:
+			key := string(event.identity.Kind) + "/" + event.identity.Name
+			if predicate, ok := pending[key]; ok && predicate(event.publications) {
+				delete(pending, key)
+			}
+		case <-timer.C:
+			t.Fatalf("timed out waiting for Gateway route outputs: %v", pending)
+		}
+	}
 }
 
 func exerciseManagerWatchGatewayEvents(t *testing.T, f *managerWatchFixture) {

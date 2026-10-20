@@ -43,13 +43,75 @@ import (
 
 type recordingOutput struct {
 	calls        int
+	identities   []source.Identity
 	publications []source.Publication
 }
 
-func (o *recordingOutput) Apply(_ context.Context, _ source.Identity, publications []source.Publication) error {
+func (o *recordingOutput) Apply(_ context.Context, identity source.Identity, publications []source.Publication) error {
 	o.calls++
+	o.identities = append(o.identities, identity)
 	o.publications = publications
 	return nil
+}
+
+func TestRouteReconcilersKeepSameNameKindsIndependent(t *testing.T) {
+	scheme := testScheme(t)
+	const namespace = "app"
+	const name = "shared"
+	objects := []client.Object{
+		&gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}},
+		&gatewayv1.TCPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}},
+		&gatewayv1.UDPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	output := &recordingOutput{}
+	request := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: name}}
+	for _, kind := range []source.SourceKind{source.SourceKindHTTPRoute, source.SourceKindTCPRoute, source.SourceKindUDPRoute} {
+		reconciler := &routeReconciler{Client: kubeClient, Output: output, Kind: kind}
+		if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+			t.Fatalf("reconcile %s: %v", kind, err)
+		}
+	}
+	if output.calls != 3 || len(output.identities) != 3 {
+		t.Fatalf("output calls=%d identities=%#v, want one call for each route kind", output.calls, output.identities)
+	}
+	for i, kind := range []source.SourceKind{source.SourceKindHTTPRoute, source.SourceKindTCPRoute, source.SourceKindUDPRoute} {
+		if output.identities[i].Kind != kind || output.identities[i].Name != name || output.identities[i].Namespace != namespace {
+			t.Fatalf("identity[%d]=%#v, want %s %s/%s", i, output.identities[i], kind, namespace, name)
+		}
+	}
+}
+
+func TestRouteMapperQueriesOnlyConfiguredKind(t *testing.T) {
+	scheme := testScheme(t)
+	httpRoute := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "http"}, Spec: gatewayv1.HTTPRouteSpec{
+		Rules: []gatewayv1.HTTPRouteRule{{BackendRefs: []gatewayv1.HTTPBackendRef{{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "api"}}}}}},
+	}}
+	tcpRoute := &gatewayv1.TCPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "tcp"}, Spec: gatewayv1.TCPRouteSpec{
+		Rules: []gatewayv1.TCPRouteRule{{BackendRefs: []gatewayv1.BackendRef{{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "api"}}}}},
+	}}
+	udpRoute := &gatewayv1.UDPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "udp"}, Spec: gatewayv1.UDPRouteSpec{
+		Rules: []gatewayv1.UDPRouteRule{{BackendRefs: []gatewayv1.BackendRef{{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "api"}}}}},
+	}}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(httpRoute, tcpRoute, udpRoute).
+		WithIndex(&gatewayv1.HTTPRoute{}, backendServiceIndex, routeBackendKeys).
+		WithIndex(&gatewayv1.TCPRoute{}, backendServiceIndex, routeBackendKeys).
+		WithIndex(&gatewayv1.UDPRoute{}, backendServiceIndex, routeBackendKeys).
+		Build()
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "api"}}
+	for _, tc := range []struct {
+		kind source.SourceKind
+		name string
+	}{
+		{source.SourceKindHTTPRoute, "http"},
+		{source.SourceKindTCPRoute, "tcp"},
+		{source.SourceKindUDPRoute, "udp"},
+	} {
+		got := (&mapper{client: kubeClient, routeKind: tc.kind}).routeService(context.Background(), service)
+		if len(got) != 1 || got[0].Name != tc.name {
+			t.Errorf("%s mapper requests=%#v, want only %q", tc.kind, got, tc.name)
+		}
+	}
 }
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -73,6 +135,10 @@ func TestSourceReconcilerRetirementWriterCorruptionIsTerminal(t *testing.T) {
 		{name: "deleted Ingress", kind: source.SourceKindIngress},
 		{name: "disabled HTTPRoute", kind: source.SourceKindHTTPRoute, exists: true},
 		{name: "deleted HTTPRoute", kind: source.SourceKindHTTPRoute},
+		{name: "disabled TCPRoute", kind: source.SourceKindTCPRoute, exists: true},
+		{name: "deleted TCPRoute", kind: source.SourceKindTCPRoute},
+		{name: "disabled UDPRoute", kind: source.SourceKindUDPRoute, exists: true},
+		{name: "deleted UDPRoute", kind: source.SourceKindUDPRoute},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			identity := source.Identity{Namespace: "app", Name: "source", UID: types.UID("uid"), Kind: tc.kind}
@@ -97,8 +163,12 @@ func TestSourceReconcilerRetirementWriterCorruptionIsTerminal(t *testing.T) {
 			if tc.exists && tc.kind == source.SourceKindIngress {
 				objects = append(objects, &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: identity.Name, Namespace: identity.Namespace, UID: identity.UID}})
 			}
-			if tc.exists && tc.kind == source.SourceKindHTTPRoute {
-				objects = append(objects, &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: identity.Name, Namespace: identity.Namespace, UID: identity.UID}})
+			if tc.exists && isGatewayRoute(tc.kind) {
+				route := source.RouteObject(tc.kind)
+				route.SetName(identity.Name)
+				route.SetNamespace(identity.Namespace)
+				route.SetUID(identity.UID)
+				objects = append(objects, route)
 			}
 			kubeClient := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).Build()
 			output := dnsendpoint.NewWriter(kubeClient)
@@ -107,7 +177,7 @@ func TestSourceReconcilerRetirementWriterCorruptionIsTerminal(t *testing.T) {
 			if tc.kind == source.SourceKindIngress {
 				_, err = (&ingressReconciler{Client: kubeClient, Output: output}).Reconcile(context.Background(), request)
 			} else {
-				_, err = (&httpRouteReconciler{Client: kubeClient, Output: output}).Reconcile(context.Background(), request)
+				_, err = (&routeReconciler{Client: kubeClient, Output: output, Kind: tc.kind}).Reconcile(context.Background(), request)
 			}
 			if !errors.Is(err, reconcile.TerminalError(nil)) {
 				t.Fatalf("error = %v, want terminal writer-state error", err)

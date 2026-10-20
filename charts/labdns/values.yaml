@@ -14,6 +14,7 @@ serviceAccount:
   name: ""
 
 leaderElection: true
+# Requires Gateway API v1.6.0 CRDs, including HTTPRoute, TCPRoute, and UDPRoute.
 gatewayAPI:
   enabled: false
 enableHTTP2: false

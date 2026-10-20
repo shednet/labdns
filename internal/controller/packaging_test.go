@@ -29,6 +29,8 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	labdnsv1alpha1 "github.com/shednet/labdns/api/v1alpha1"
 )
@@ -73,6 +75,13 @@ func TestExamplesAcceptedByAPIAdmission(t *testing.T) {
 	t.Cleanup(func() { cleanupSharedNamespaces(t, ingress.Namespace) })
 	if err := kubeClient.Create(ctx, ingress); err != nil {
 		t.Fatalf("Ingress example rejected by Kubernetes API: %v", err)
+	}
+	for _, route := range []client.Object{readExampleTCPRoute(t), readExampleUDPRoute(t)} {
+		route.SetName("packaging-" + route.GetName())
+		route.SetNamespace(ingress.Namespace)
+		if err := kubeClient.Create(ctx, route); err != nil {
+			t.Fatalf("%s example rejected by Kubernetes API: %v", route.GetObjectKind().GroupVersionKind().Kind, err)
+		}
 	}
 }
 
@@ -123,4 +132,40 @@ func readExampleIngress(t *testing.T) *networkingv1.Ingress {
 		t.Fatalf("decode Ingress example: %v", err)
 	}
 	return ingress
+}
+
+func readExampleTCPRoute(t *testing.T) *gatewayv1.TCPRoute {
+	t.Helper()
+	file, err := os.Open(filepath.Join("..", "..", "examples", "tcp-route.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			t.Errorf("close TCPRoute example: %v", err)
+		}
+	}()
+	route := &gatewayv1.TCPRoute{}
+	if err := utilyaml.NewYAMLOrJSONDecoder(file, 4096).Decode(route); err != nil {
+		t.Fatalf("decode TCPRoute example: %v", err)
+	}
+	return route
+}
+
+func readExampleUDPRoute(t *testing.T) *gatewayv1.UDPRoute {
+	t.Helper()
+	file, err := os.Open(filepath.Join("..", "..", "examples", "udp-route.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			t.Errorf("close UDPRoute example: %v", err)
+		}
+	}()
+	route := &gatewayv1.UDPRoute{}
+	if err := utilyaml.NewYAMLOrJSONDecoder(file, 4096).Decode(route); err != nil {
+		t.Fatalf("decode UDPRoute example: %v", err)
+	}
+	return route
 }

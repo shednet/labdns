@@ -47,7 +47,7 @@ type noGatewayReadClient struct {
 }
 
 func (c *noGatewayReadClient) Get(ctx context.Context, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
-	if _, gatewayRead := object.(*gatewayv1.HTTPRoute); gatewayRead {
+	if isGatewayRoute(source.RouteKind(object)) {
 		c.reads++
 		return errors.New("Gateway API read is forbidden")
 	}
@@ -130,9 +130,37 @@ func TestLifecycleReconcilerRetirementModes(t *testing.T) {
 			wantRequeueAfter:  time.Minute,
 		},
 		{
+			name:              "gateway disabled TCPRoute",
+			identity:          source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: "TCPRoute", Namespace: "app", Name: "route", UID: types.UID("route-uid")},
+			forbidGatewayRead: true,
+			wantRetired:       true,
+			wantRequeueAfter:  time.Minute,
+		},
+		{
+			name:              "gateway disabled UDPRoute",
+			identity:          source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: "UDPRoute", Namespace: "app", Name: "route", UID: types.UID("route-uid")},
+			forbidGatewayRead: true,
+			wantRetired:       true,
+			wantRequeueAfter:  time.Minute,
+		},
+		{
 			name:           "gateway enabled live HTTPRoute",
 			identity:       source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: "HTTPRoute", Namespace: "app", Name: "route", UID: types.UID("route-uid")},
 			sourceObject:   &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "app", UID: types.UID("route-uid")}},
+			gatewayEnabled: true,
+			wantRetired:    false,
+		},
+		{
+			name:           "gateway enabled live TCPRoute",
+			identity:       source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: "TCPRoute", Namespace: "app", Name: "route", UID: types.UID("route-uid")},
+			sourceObject:   &gatewayv1.TCPRoute{ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "app", UID: types.UID("route-uid")}},
+			gatewayEnabled: true,
+			wantRetired:    false,
+		},
+		{
+			name:           "gateway enabled live UDPRoute",
+			identity:       source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: "UDPRoute", Namespace: "app", Name: "route", UID: types.UID("route-uid")},
+			sourceObject:   &gatewayv1.UDPRoute{ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "app", UID: types.UID("route-uid")}},
 			gatewayEnabled: true,
 			wantRetired:    false,
 		},
