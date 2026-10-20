@@ -24,6 +24,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -720,9 +721,11 @@ func emptyDNSExpectationsByType(forward *dnsForward, sources []publicationSource
 }
 
 func assertDNSStageEventually(ctx context.Context, expectations []dnsExpectation, timeout time.Duration) {
+	started := time.Now()
 	Eventually(func(g Gomega) {
 		assertDNSStage(g, ctx, expectations)
 	}, timeout, 250*time.Millisecond).Should(Succeed())
+	GinkgoWriter.Printf("DNS converged: %d exact answer sets verified in %s\n", len(expectations), time.Since(started).Round(time.Millisecond))
 }
 
 func assertDNSStageNow(ctx context.Context, expectations []dnsExpectation) {
@@ -1204,7 +1207,8 @@ func startDNSForward(ctx context.Context, service string) *dnsForward {
 	port := listener.Addr().(*net.TCPAddr).Port
 	Expect(listener.Close()).To(Succeed())
 	command := exec.Command("kubectl", kubectlArgs("port-forward", "--namespace", systemNamespace, "service/"+service, fmt.Sprintf("%d:53", port))...)
-	command.Stdout = GinkgoWriter
+	// Suppress per-connection stdout notices while retaining stderr diagnostics.
+	command.Stdout = io.Discard
 	command.Stderr = GinkgoWriter
 	Expect(command.Start()).To(Succeed())
 	forward := &dnsForward{address: fmt.Sprintf("127.0.0.1:%d", port), command: command}
@@ -1215,6 +1219,7 @@ func startDNSForward(ctx context.Context, service string) *dnsForward {
 		}
 		return dialErr
 	}, normalTimeout, 100*time.Millisecond).WithContext(ctx).Should(Succeed())
+	GinkgoWriter.Printf("DNS forward ready: service/%s -> %s (TCP)\n", service, forward.address)
 	return forward
 }
 
