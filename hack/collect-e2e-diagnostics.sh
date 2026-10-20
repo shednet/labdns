@@ -48,6 +48,7 @@ fi
 "${KIND:-kind}" export logs --name "${KIND_CLUSTER}" "${E2E_DIAGNOSTICS_DIR}/kind" || true
 kubectl --kubeconfig "${kubeconfig}" --context "${context}" get nodes -o wide >"${E2E_DIAGNOSTICS_DIR}/nodes.txt" 2>&1 || true
 kubectl --kubeconfig "${kubeconfig}" --context "${context}" get all,dnsproviders,dnsendpoints,endpointslices,ingresses -A -o yaml >"${E2E_DIAGNOSTICS_DIR}/objects.yaml" 2>&1 || true
+kubectl --kubeconfig "${kubeconfig}" --context "${context}" get gatewayclasses,gateways,httproutes,tcproutes,udproutes,referencegrants -A -o yaml >"${E2E_DIAGNOSTICS_DIR}/gateway-objects.yaml" 2>&1 || true
 kubectl --kubeconfig "${kubeconfig}" --context "${context}" get events -A --sort-by=.lastTimestamp >"${E2E_DIAGNOSTICS_DIR}/events.txt" 2>&1 || true
 
 for deployment in labdns external-dns-www external-dns-vpn coredns-www coredns-vpn etcd-www etcd-vpn; do
