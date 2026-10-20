@@ -81,7 +81,8 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "Metrics TLS private-key filename.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false, "Enable HTTP/2 for the metrics server.")
 	flag.StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, or error.")
-	flag.BoolVar(&enableGatewayAPI, "enable-gateway-api", false, "Watch Gateway API HTTPRoute sources.")
+	flag.BoolVar(&enableGatewayAPI, "enable-gateway-api", false,
+		"Watch Gateway API HTTPRoute, TCPRoute, and UDPRoute sources.")
 	flag.Parse()
 
 	level, err := parseLogLevel(logLevel)

@@ -301,6 +301,165 @@ func TestHTTPRouteReferenceGrant(t *testing.T) {
 	}
 }
 
+func TestGatewayRouteProjectionAndHelpers(t *testing.T) {
+	for _, kind := range []SourceKind{SourceKindHTTPRoute, SourceKindTCPRoute, SourceKindUDPRoute} {
+		t.Run(string(kind), func(t *testing.T) {
+			route := newGatewayRouteForTest(kind, gatewayv1.BackendObjectReference{Name: "api"})
+			if got := RouteKind(route); got != kind {
+				t.Fatalf("RouteKind() = %q, want %q", got, kind)
+			}
+			if got := RouteKind(RouteObject(kind)); got != kind {
+				t.Fatalf("RouteKind(RouteObject()) = %q, want %q", got, kind)
+			}
+			if _, ok := RouteObject(SourceKindIngress).(*gatewayv1.HTTPRoute); ok || RouteObject(SourceKindIngress) != nil {
+				t.Fatal("RouteObject(Ingress) returned a Gateway route")
+			}
+			if parents := RouteParents(route); len(parents) != 1 || string(parents[0].Name) != "gateway" {
+				t.Fatalf("RouteParents() = %#v, want gateway parent", parents)
+			}
+			if refs := RouteBackendRefs(route); len(refs) != 1 || refs[0].Name != "api" {
+				t.Fatalf("RouteBackendRefs() = %#v, want api backend", refs)
+			}
+
+			got, err := RouteProjection(context.Background(), nil, route, []string{"override.example.com"}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].Hostname != "override.example.com" || len(got[0].Backends) != 1 || got[0].Backends[0].Key() != "app/api" {
+				t.Fatalf("unexpected projection %#v", got)
+			}
+		})
+	}
+}
+
+func TestTCPAndUDPRoutesWithoutInheritedHostnameDoNotProject(t *testing.T) {
+	for _, kind := range []SourceKind{SourceKindTCPRoute, SourceKindUDPRoute} {
+		t.Run(string(kind), func(t *testing.T) {
+			route := newGatewayRouteForTest(kind, gatewayv1.BackendObjectReference{Name: "api"})
+			var diagnostics []string
+			got, err := RouteProjection(context.Background(), nil, route, nil, func(severity, reason, _ string) {
+				diagnostics = append(diagnostics, severity+":"+reason)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 0 {
+				t.Fatalf("route without inherited hostnames produced projection: %#v", got)
+			}
+			if want := []string{"Normal:NoPublishableHostname"}; !equalStrings(diagnostics, want) {
+				t.Fatalf("diagnostics = %v, want %v", diagnostics, want)
+			}
+		})
+	}
+}
+
+func TestGatewayRouteReferenceGrantUsesActualRouteKind(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = gatewayv1.Install(scheme)
+	_ = gatewayv1beta1.Install(scheme)
+	for _, kind := range []SourceKind{SourceKindHTTPRoute, SourceKindTCPRoute, SourceKindUDPRoute} {
+		t.Run(string(kind), func(t *testing.T) {
+			ref := gatewayv1.BackendObjectReference{Name: "api", Namespace: ptr.To(gatewayv1.Namespace("backend"))}
+			route := newGatewayRouteForTest(kind, ref)
+			grant := &gatewayv1beta1.ReferenceGrant{
+				ObjectMeta: metav1.ObjectMeta{Name: "allow", Namespace: "backend"},
+				Spec: gatewayv1beta1.ReferenceGrantSpec{
+					From: []gatewayv1beta1.ReferenceGrantFrom{{Group: gatewayv1.GroupName, Kind: gatewayv1beta1.Kind(kind), Namespace: "app"}},
+					To:   []gatewayv1beta1.ReferenceGrantTo{{Group: "", Kind: "Service", Name: ptr.To(gatewayv1beta1.ObjectName("api"))}},
+				},
+			}
+			reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(grant).Build()
+			got, err := RouteProjection(context.Background(), reader, route, []string{"app.example.com"}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || len(got[0].Backends) != 1 || got[0].Backends[0].Key() != "backend/api" {
+				t.Fatalf("matching ReferenceGrant was not accepted: %#v", got)
+			}
+
+			wrongKind := gatewayv1beta1.Kind(SourceKindHTTPRoute)
+			if kind == SourceKindHTTPRoute {
+				wrongKind = gatewayv1beta1.Kind(SourceKindTCPRoute)
+			}
+			grant.Spec.From[0].Kind = wrongKind
+			reader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(grant).Build()
+			var diagnostics []string
+			got, err = RouteProjection(context.Background(), reader, route, []string{"app.example.com"}, func(severity, reason, _ string) {
+				diagnostics = append(diagnostics, severity+":"+reason)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 0 {
+				t.Fatalf("grant for %s incorrectly authorized %s: %#v", wrongKind, kind, got)
+			}
+			if want := []string{"Warning:UnsupportedBackend"}; !equalStrings(diagnostics, want) {
+				t.Fatalf("diagnostics = %v, want %v", diagnostics, want)
+			}
+		})
+	}
+}
+
+func TestGatewayRouteProjectionSkipsUnsupportedBackendReferences(t *testing.T) {
+	for _, kind := range []SourceKind{SourceKindTCPRoute, SourceKindUDPRoute} {
+		t.Run(string(kind), func(t *testing.T) {
+			unsupported := gatewayv1.BackendObjectReference{Name: "widget", Group: ptr.To(gatewayv1.Group("example.test")), Kind: ptr.To(gatewayv1.Kind("Widget"))}
+			route := newGatewayRouteForTest(kind, gatewayv1.BackendObjectReference{Name: "api"}, unsupported)
+			var diagnostics []string
+			got, err := RouteProjection(context.Background(), nil, route, []string{"app.example.com"}, func(severity, reason, message string) {
+				diagnostics = append(diagnostics, severity+":"+reason)
+				if !strings.Contains(message, string(kind)+" app/route") || !strings.Contains(message, `backendRef "widget"`) {
+					t.Errorf("unsupported backend diagnostic lacks route context: %q", message)
+				}
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || len(got[0].Backends) != 1 || got[0].Backends[0].Key() != "app/api" {
+				t.Fatalf("unsupported reference changed supported projection: %#v", got)
+			}
+			if want := []string{"Warning:UnsupportedBackend"}; !equalStrings(diagnostics, want) {
+				t.Fatalf("diagnostics = %v, want %v", diagnostics, want)
+			}
+		})
+	}
+}
+
+func newGatewayRouteForTest(kind SourceKind, refs ...gatewayv1.BackendObjectReference) client.Object {
+	common := gatewayv1.CommonRouteSpec{ParentRefs: []gatewayv1.ParentReference{{Name: "gateway"}}}
+	switch kind {
+	case SourceKindHTTPRoute:
+		backendRefs := make([]gatewayv1.HTTPBackendRef, 0, len(refs))
+		for _, ref := range refs {
+			backendRefs = append(backendRefs, gatewayv1.HTTPBackendRef{BackendRef: gatewayv1.BackendRef{BackendObjectReference: ref}})
+		}
+		return &gatewayv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "app"},
+			Spec:       gatewayv1.HTTPRouteSpec{CommonRouteSpec: common, Hostnames: []gatewayv1.Hostname{"spec.example.com"}, Rules: []gatewayv1.HTTPRouteRule{{BackendRefs: backendRefs}}},
+		}
+	case SourceKindTCPRoute:
+		backendRefs := make([]gatewayv1.BackendRef, 0, len(refs))
+		for _, ref := range refs {
+			backendRefs = append(backendRefs, gatewayv1.BackendRef{BackendObjectReference: ref})
+		}
+		return &gatewayv1.TCPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "app"},
+			Spec:       gatewayv1.TCPRouteSpec{CommonRouteSpec: common, Rules: []gatewayv1.TCPRouteRule{{BackendRefs: backendRefs}}},
+		}
+	case SourceKindUDPRoute:
+		backendRefs := make([]gatewayv1.BackendRef, 0, len(refs))
+		for _, ref := range refs {
+			backendRefs = append(backendRefs, gatewayv1.BackendRef{BackendObjectReference: ref})
+		}
+		return &gatewayv1.UDPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "app"},
+			Spec:       gatewayv1.UDPRouteSpec{CommonRouteSpec: common, Rules: []gatewayv1.UDPRouteRule{{BackendRefs: backendRefs}}},
+		}
+	default:
+		panic("unsupported test Gateway route kind: " + string(kind))
+	}
+}
+
 func TestResolverUsesReadyEndpointNodesAndNodeLabels(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)

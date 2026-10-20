@@ -591,22 +591,30 @@ func TestWriterAPIServerContract(t *testing.T) {
 	assertWriterRejectsDeleteConflict(t, fixture, recreated, changed, conflictPublication)
 }
 
-func TestGatewayDisabledRestartRetiresHTTPRouteWithoutGatewayCRDs(t *testing.T) {
+func TestGatewayDisabledRestartRetiresAllRouteKindsWithoutGatewayCRDs(t *testing.T) {
 	config, scheme, direct := startNoGatewayEnvironment(t)
 	ctx := context.Background()
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "gateway-disabled"}}
 	if err := direct.Create(ctx, namespace); err != nil {
 		t.Fatal(err)
 	}
-	identity := source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: "HTTPRoute", Namespace: namespace.Name, Name: "survivor", UID: types.UID("old-route-uid")}
-	object := &externaldnsv1alpha1.DNSEndpoint{ObjectMeta: metav1.ObjectMeta{
-		Name:        dnsendpoint.ObjectName(identity, "www"),
-		Namespace:   namespace.Name,
-		Labels:      map[string]string{dnsendpoint.ManagedByLabel: dnsendpoint.ManagedByValue, dnsendpoint.ProviderLabel: "www", dnsendpoint.SourceKeyLabel: dnsendpoint.SourceKey(identity)},
-		Annotations: map[string]string{dnsendpoint.SourceKindAnnotation: "HTTPRoute", dnsendpoint.SourceNamespaceAnnotation: namespace.Name, dnsendpoint.SourceNameAnnotation: identity.Name, dnsendpoint.SourceUIDAnnotation: string(identity.UID), dnsendpoint.DeletionDelayAnnotation: "1s", dnsendpoint.LifecycleAnnotation: `{"version":1,"pending":[]}`},
-	}, Spec: externaldnsv1alpha1.DNSEndpointSpec{Endpoints: []*endpoint.Endpoint{{DNSName: "route.example.com", RecordType: "A", Targets: []string{"192.0.2.50"}, RecordTTL: 300}}}}
-	if err := direct.Create(ctx, object); err != nil {
-		t.Fatal(err)
+	objects := map[client.ObjectKey]string{}
+	for _, kind := range []source.SourceKind{source.SourceKindHTTPRoute, source.SourceKindTCPRoute, source.SourceKindUDPRoute} {
+		identity := source.Identity{APIVersion: gatewayv1.GroupVersion.String(), Kind: kind, Namespace: namespace.Name, Name: "survivor-" + strings.ToLower(string(kind)), UID: types.UID("old-" + strings.ToLower(string(kind)) + "-uid")}
+		object := &externaldnsv1alpha1.DNSEndpoint{ObjectMeta: metav1.ObjectMeta{
+			Name:      dnsendpoint.ObjectName(identity, "www"),
+			Namespace: namespace.Name,
+			Labels:    map[string]string{dnsendpoint.ManagedByLabel: dnsendpoint.ManagedByValue, dnsendpoint.ProviderLabel: "www", dnsendpoint.SourceKeyLabel: dnsendpoint.SourceKey(identity)},
+			Annotations: map[string]string{
+				dnsendpoint.SourceKindAnnotation: string(kind), dnsendpoint.SourceNamespaceAnnotation: namespace.Name,
+				dnsendpoint.SourceNameAnnotation: identity.Name, dnsendpoint.SourceUIDAnnotation: string(identity.UID),
+				dnsendpoint.DeletionDelayAnnotation: "1s", dnsendpoint.LifecycleAnnotation: `{"version":1,"pending":[]}`,
+			},
+		}, Spec: externaldnsv1alpha1.DNSEndpointSpec{Endpoints: []*endpoint.Endpoint{{DNSName: "route.example.com", RecordType: "A", Targets: []string{"192.0.2.50"}, RecordTTL: 300}}}}
+		if err := direct.Create(ctx, object); err != nil {
+			t.Fatal(err)
+		}
+		objects[client.ObjectKeyFromObject(object)] = "192.0.2.50"
 	}
 	mgr, err := ctrl.NewManager(config, ctrl.Options{Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0", Controller: controllerconfig.Controller{SkipNameValidation: new(true)}})
 	if err != nil {
@@ -617,25 +625,46 @@ func TestGatewayDisabledRestartRetiresHTTPRouteWithoutGatewayCRDs(t *testing.T) 
 		t.Fatal(err)
 	}
 	_ = startManagedTestManager(t, mgr, ctx)
-	key := client.ObjectKeyFromObject(object)
+	observedPending := map[client.ObjectKey]bool{}
 	deadline := time.Now().Add(10 * time.Second)
-	observedPending := false
-	for time.Now().Before(deadline) {
-		var current externaldnsv1alpha1.DNSEndpoint
-		err := direct.Get(ctx, key, &current)
-		if apierrors.IsNotFound(err) {
-			if !observedPending {
-				t.Fatal("HTTPRoute DNSEndpoint deleted without observable retirement")
+	for time.Now().Before(deadline) && len(observedPending) != len(objects) {
+		for key := range objects {
+			if observedPending[key] {
+				continue
 			}
-			return
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(current.Annotations[dnsendpoint.LifecycleAnnotation], `"target":"192.0.2.50"`) {
-			observedPending = true
+			var current externaldnsv1alpha1.DNSEndpoint
+			err := direct.Get(ctx, key, &current)
+			if apierrors.IsNotFound(err) {
+				t.Fatalf("%s DNSEndpoint deleted without observable retirement", current.Annotations[dnsendpoint.SourceKindAnnotation])
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(current.Annotations[dnsendpoint.LifecycleAnnotation], `"target":"192.0.2.50"`) {
+				observedPending[key] = true
+			}
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatal("HTTPRoute DNSEndpoint did not expire with Gateway disabled")
+	if len(observedPending) != len(objects) {
+		t.Fatalf("observed pending retirement for %d/%d route DNSEndpoints", len(observedPending), len(objects))
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		remaining := 0
+		for key := range objects {
+			var current externaldnsv1alpha1.DNSEndpoint
+			err := direct.Get(ctx, key, &current)
+			if err == nil {
+				remaining++
+			} else if !apierrors.IsNotFound(err) {
+				t.Fatal(err)
+			}
+		}
+		if remaining == 0 {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("Gateway route DNSEndpoints did not expire with Gateway support disabled: %v", objects)
 }

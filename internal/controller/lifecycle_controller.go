@@ -51,6 +51,8 @@ type lifecycleReconciler struct {
 const (
 	sourceKindIngress   = source.SourceKindIngress
 	sourceKindHTTPRoute = source.SourceKindHTTPRoute
+	sourceKindTCPRoute  = source.SourceKindTCPRoute
+	sourceKindUDPRoute  = source.SourceKindUDPRoute
 )
 
 func (r *lifecycleReconciler) Reconcile(ctx context.Context, request ctrl.Request) (result ctrl.Result, reconcileErr error) {
@@ -82,7 +84,7 @@ func (r *lifecycleReconciler) Reconcile(ctx context.Context, request ctrl.Reques
 	switch identity.Kind {
 	case sourceKindIngress:
 		identity.APIVersion = networkingv1.SchemeGroupVersion.String()
-	case sourceKindHTTPRoute:
+	case sourceKindHTTPRoute, sourceKindTCPRoute, sourceKindUDPRoute:
 		identity.APIVersion = gatewayv1.GroupVersion.String()
 	default:
 		return ctrl.Result{}, r.terminalFailure(&object, fmt.Errorf("unsupported source kind %q", identity.Kind))
@@ -92,7 +94,7 @@ func (r *lifecycleReconciler) Reconcile(ctx context.Context, request ctrl.Reques
 		object.Labels[dnsendpoint.SourceKeyLabel] != dnsendpoint.SourceKey(identity) || object.Name != dnsendpoint.ObjectName(identity, provider) {
 		return ctrl.Result{}, r.terminalFailure(&object, fmt.Errorf("inconsistent managed source identity metadata"))
 	}
-	retire := identity.Kind == sourceKindHTTPRoute && !r.GatewayEnabled
+	retire := isGatewayRoute(identity.Kind) && !r.GatewayEnabled
 	if !retire {
 		exists, uid, err := r.source(ctx, identity)
 		if err != nil {
@@ -124,8 +126,8 @@ func (r *lifecycleReconciler) source(ctx context.Context, identity source.Identi
 	switch identity.Kind {
 	case sourceKindIngress:
 		object = &networkingv1.Ingress{}
-	case sourceKindHTTPRoute:
-		object = &gatewayv1.HTTPRoute{}
+	case sourceKindHTTPRoute, sourceKindTCPRoute, sourceKindUDPRoute:
+		object = source.RouteObject(identity.Kind)
 	}
 	if err := r.Get(ctx, key, object); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -134,6 +136,15 @@ func (r *lifecycleReconciler) source(ctx context.Context, identity source.Identi
 		return false, "", fmt.Errorf("verify source %s %s/%s: %w", identity.Kind, identity.Namespace, identity.Name, err)
 	}
 	return true, object.GetUID(), nil
+}
+
+func isGatewayRoute(kind source.SourceKind) bool {
+	switch kind {
+	case sourceKindHTTPRoute, sourceKindTCPRoute, sourceKindUDPRoute:
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *lifecycleReconciler) failure(object client.Object, err error) error {

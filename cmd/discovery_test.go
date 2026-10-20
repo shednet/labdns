@@ -18,6 +18,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -58,7 +59,7 @@ func TestCheckPrerequisitesRejectsWrongKindAndMissingVerb(t *testing.T) {
 		t.Fatal("accepted DNSEndpoint without write verbs")
 	}
 	resources = validDiscoveryResources()
-	resources["gateway.networking.k8s.io/v1"].APIResources[2].Kind = "WrongClass"
+	resources["gateway.networking.k8s.io/v1"].APIResources[4].Kind = "WrongClass"
 	if err := checkPrerequisites(fakeDiscovery{resources: resources}, true); err == nil {
 		t.Fatal("accepted wrong GatewayClass kind")
 	}
@@ -73,6 +74,8 @@ func validDiscoveryResources() map[string]*metav1.APIResourceList {
 		}}},
 		"gateway.networking.k8s.io/v1": {APIResources: []metav1.APIResource{
 			{Name: "httproutes", Kind: "HTTPRoute", Namespaced: true, Verbs: readVerbs},
+			{Name: "tcproutes", Kind: "TCPRoute", Namespaced: true, Verbs: readVerbs},
+			{Name: "udproutes", Kind: "UDPRoute", Namespaced: true, Verbs: readVerbs},
 			{Name: "gateways", Kind: "Gateway", Namespaced: true, Verbs: readVerbs},
 			{Name: "gatewayclasses", Kind: "GatewayClass", Namespaced: false, Verbs: readVerbs},
 		}},
@@ -81,6 +84,30 @@ func validDiscoveryResources() map[string]*metav1.APIResourceList {
 				Name: "referencegrants", Kind: "ReferenceGrant", Namespaced: true, Verbs: readVerbs,
 			}},
 		},
+	}
+}
+
+func TestCheckPrerequisitesRequiresEveryGatewayRouteKind(t *testing.T) {
+	for _, route := range []struct{ name, kind string }{
+		{name: "tcproutes", kind: "TCPRoute"},
+		{name: "udproutes", kind: "UDPRoute"},
+	} {
+		t.Run(route.kind, func(t *testing.T) {
+			resources := validDiscoveryResources()
+			list := resources["gateway.networking.k8s.io/v1"]
+			filtered := list.APIResources[:0]
+			for _, resource := range list.APIResources {
+				if resource.Name != route.name {
+					filtered = append(filtered, resource)
+				}
+			}
+			list.APIResources = filtered
+			if err := checkPrerequisites(fakeDiscovery{resources: resources}, true); err == nil {
+				t.Fatalf("accepted missing %s", route.kind)
+			} else if !strings.Contains(err.Error(), route.name) {
+				t.Fatalf("error = %v, want missing %s reported", err, route.name)
+			}
+		})
 	}
 }
 

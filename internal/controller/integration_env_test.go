@@ -44,7 +44,7 @@ import (
 
 // integrationEnvironment is shared by all ordinary controller integration tests.
 // The only test that needs a different API surface starts its own environment:
-// TestGatewayDisabledRestartRetiresHTTPRouteWithoutGatewayCRDs.
+// TestGatewayDisabledRestartRetiresAllRouteKindsWithoutGatewayCRDs.
 type integrationEnvironment struct {
 	environment *envtest.Environment
 	config      *rest.Config
