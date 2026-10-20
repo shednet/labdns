@@ -75,7 +75,7 @@ Install a fresh environment in this order:
    Gateway API v1.6.0 CRDs:
 
    ```sh
-   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.0/standard-install.yaml
+   kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.0/standard-install.yaml
    helm upgrade --install labdns oci://ghcr.io/shednet/charts/labdns \
      --namespace labdns-system --create-namespace \
      --version "${LABDNS_VERSION#v}" --set gatewayAPI.enabled=true
