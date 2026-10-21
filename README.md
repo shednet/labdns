@@ -46,7 +46,7 @@ the ExternalDNS `DNSEndpoint` CRD, and separately managed ExternalDNS deployment
 
 ## Development
 
-Development requires Go 1.26.1 and Helm. The Makefile installs its Go tools and
+Development requires Go 1.27.3 and Helm. The Makefile installs its Go tools and
 Kubernetes test assets in `bin/`; Helm must already be available on `PATH`.
 
 Run the required checks before submitting a change:
