@@ -29,6 +29,8 @@ linters:
         - name: import-shadowing
     modernize:
       disable:
+        # Keep Kubernetes metadata explicit in composite literals.
+        - embedlit
         - omitzero
   exclusions:
     generated: lax

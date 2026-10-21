@@ -2,7 +2,7 @@
   description = "labdns development shell";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -18,14 +18,14 @@
         pkgs = import nixpkgs {
           inherit system;
         };
-        buildGo126Module = pkgs.buildGoModule.override { go = pkgs.go_1_26; };
+        buildGo127Module = pkgs.buildGoModule.override { go = pkgs.go_1_27; };
         cliVersion = self.shortRev or "dev";
-        labdns = buildGo126Module {
+        labdns = buildGo127Module {
           pname = "labdns";
           version = cliVersion;
           src = self;
           subPackages = [ "cmd/labdns" ];
-          vendorHash = "sha256-grhn8W1caKMoKQgdSQwLKKia+Jn2352RbaTq/lyO1BA=";
+          vendorHash = "sha256-JWRWe43Bf4tZ5zB+os+BUHWvqH/x2chil21l2l7FVX0=";
           ldflags = [ "-s" "-w" "-X main.version=${cliVersion}" ];
           nativeBuildInputs = [ pkgs.installShellFiles ];
           postInstall = ''
@@ -44,7 +44,7 @@
 
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
-            go_1_26
+            go_1_27
             kind
             kubernetes-helm
           ];
