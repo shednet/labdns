@@ -233,18 +233,24 @@ func newStatusCommand(options *commandOptions) *cobra.Command {
 
 func addRecordFilters(command *cobra.Command, options *commandOptions) {
 	command.Flags().StringVar(&options.filters.provider, "provider", "", "Limit records to a logical DNSProvider")
-	command.Flags().StringVar(&options.filters.sourceKind, "source-kind", "", "Limit records to a source kind")
+	command.Flags().StringVar(&options.filters.sourceKind, "source-kind", "", "Limit records to Ingress, HTTPRoute, TCPRoute, or UDPRoute sources")
 	command.Flags().StringVar(&options.filters.recordType, "record-type", "", "Limit records to a DNS record type")
 }
 
 func (o *recordFilterOptions) filters(namespace string) filters {
-	sourceKind, _ := canonicalFilterValue(o.sourceKind, "", string(sourceKindIngressFilter), string(sourceKindHTTPRouteFilter))
+	sourceKind, _ := canonicalFilterValue(
+		o.sourceKind, "", string(sourceKindIngressFilter), string(sourceKindHTTPRouteFilter),
+		string(sourceKindTCPRouteFilter), string(sourceKindUDPRouteFilter),
+	)
 	recordType, _ := canonicalFilterValue(o.recordType, "", string(recordTypeAFilter), string(recordTypeAAAAFilter))
 	return filters{Namespace: namespace, Provider: o.provider, SourceKind: sourceKindFilter(sourceKind), RecordType: recordTypeFilter(recordType)}
 }
 
 func (o *recordFilterOptions) validate() error {
-	if _, err := canonicalFilterValue(o.sourceKind, "source kind", string(sourceKindIngressFilter), string(sourceKindHTTPRouteFilter)); err != nil {
+	if _, err := canonicalFilterValue(
+		o.sourceKind, "source kind", string(sourceKindIngressFilter), string(sourceKindHTTPRouteFilter),
+		string(sourceKindTCPRouteFilter), string(sourceKindUDPRouteFilter),
+	); err != nil {
 		return err
 	}
 	if _, err := canonicalFilterValue(o.recordType, "record type", string(recordTypeAFilter), string(recordTypeAAAAFilter)); err != nil {

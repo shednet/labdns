@@ -3,15 +3,15 @@
 labdns helps ExternalDNS publish DNS records for Kubernetes applications.
 
 Kubernetes does not always provide an address that ExternalDNS can publish for
-an Ingress or HTTPRoute. For example, an ingress controller may run on every
+an Ingress or Gateway API route. For example, an ingress controller may run on every
 Node as a DaemonSet and have only a ClusterIP Service, rather than a
 LoadBalancer address. labdns fills this gap by using addresses you assign to
 the Nodes that can serve each application.
 
-It watches opted-in Ingresses and, when enabled, HTTPRoutes. For each hostname,
-labdns follows the backend Service to the Nodes that are serving it, reads the
-publishable IP addresses from Node labels, and creates an ExternalDNS
-`DNSEndpoint` object.
+It watches opted-in Ingresses and, when enabled, HTTPRoute, TCPRoute, and
+UDPRoute resources. For each hostname, labdns follows the backend Service to
+the Nodes that are serving it, reads the publishable IP addresses from Node
+labels, and creates an ExternalDNS `DNSEndpoint` object.
 
 ExternalDNS reads those objects and updates your DNS service. You install and
 manage ExternalDNS separately.
@@ -20,7 +20,7 @@ manage ExternalDNS separately.
 
 1. You define a `DNSProvider`. Despite its name, this is only a labdns settings
    object. It says which DNS zones and Node address labels to use.
-2. You add labdns annotations to an Ingress or HTTPRoute and choose one or more
+2. You add labdns annotations to an Ingress or Gateway API route and choose one or more
    `DNSProvider` objects.
 3. labdns finds the ready backend endpoints and the Nodes that host them.
 4. labdns creates one `DNSEndpoint` for each selected `DNSProvider`.
@@ -46,7 +46,7 @@ the ExternalDNS `DNSEndpoint` CRD, and separately managed ExternalDNS deployment
 
 ## Development
 
-Development requires Go 1.26.1 and Helm. The Makefile installs its Go tools and
+Development requires Go 1.27.3 and Helm. The Makefile installs its Go tools and
 Kubernetes test assets in `bin/`; Helm must already be available on `PATH`.
 
 Run the required checks before submitting a change:

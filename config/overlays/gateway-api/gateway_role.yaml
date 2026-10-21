@@ -4,5 +4,5 @@ metadata:
   name: gateway-reader
 rules:
 - apiGroups: [gateway.networking.k8s.io]
-  resources: [gatewayclasses, gateways, httproutes, referencegrants]
+  resources: [gatewayclasses, gateways, httproutes, tcproutes, udproutes, referencegrants]
   verbs: [get, list, watch]

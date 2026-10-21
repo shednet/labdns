@@ -229,6 +229,14 @@ setup-test-e2e-stack: ## Build and install the E2E stack in the isolated cluster
 		$(KIND) load docker-image --name "$${KIND_CLUSTER}" "$${image}"; \
 	fi; \
 	$(KUBECTL) --kubeconfig "$${kubeconfig}" --context "$${context}" apply -f test/fixtures/external-dns-v0.21.0/dnsendpoints.externaldns.k8s.io.yaml; \
+	go mod download sigs.k8s.io/gateway-api; \
+	gateway_crds="$$(go list -m -f '{{.Dir}}' sigs.k8s.io/gateway-api)/config/crd/standard"; \
+	test -d "$${gateway_crds}" || { echo "Pinned Gateway API standard CRDs are unavailable." >&2; exit 1; }; \
+	$(KUBECTL) --kubeconfig "$${kubeconfig}" --context "$${context}" apply --server-side -f "$${gateway_crds}"; \
+	$(KUBECTL) --kubeconfig "$${kubeconfig}" --context "$${context}" wait --for=condition=Established --timeout=60s \
+		crd/gatewayclasses.gateway.networking.k8s.io crd/gateways.gateway.networking.k8s.io \
+		crd/httproutes.gateway.networking.k8s.io crd/tcproutes.gateway.networking.k8s.io \
+		crd/udproutes.gateway.networking.k8s.io crd/referencegrants.gateway.networking.k8s.io; \
 	$(KUBECTL) --kubeconfig "$${kubeconfig}" --context "$${context}" apply -f config/crd/bases/labdns.shednet.dev_dnsproviders.yaml; \
 	$(KUBECTL) --kubeconfig "$${kubeconfig}" --context "$${context}" apply -f test/e2e/stack.yaml; \
 	$(HELM) --kubeconfig "$${kubeconfig}" --kube-context "$${context}" upgrade --install labdns charts/labdns \
@@ -238,6 +246,7 @@ setup-test-e2e-stack: ## Build and install the E2E stack in the isolated cluster
 		--set image.tag="$${image_tag}" \
 		--set image.pullPolicy=Never \
 		--set leaderElection=false \
+		--set gatewayAPI.enabled=true \
 		--wait --timeout=3m; \
 	for deployment in etcd-www etcd-vpn coredns-www coredns-vpn external-dns-www external-dns-vpn; do \
 		$(KUBECTL) --kubeconfig "$${kubeconfig}" --context "$${context}" rollout status \
@@ -411,7 +420,7 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   [ -n "$$v" ] || { echo "Set ENVTEST_K8S_VERSION manually (k8s.io/api replace has no tag)" >&2; exit 1; }; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
-GOLANGCI_LINT_VERSION ?= v2.13.2
+GOLANGCI_LINT_VERSION ?= v2.14.0
 ACTIONLINT_VERSION ?= v1.7.7
 
 .PHONY: kustomize

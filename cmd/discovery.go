@@ -48,6 +48,8 @@ func checkPrerequisites(discovery resourceDiscovery, gatewayEnabled bool) error 
 	if gatewayEnabled {
 		if err := requireResources(discovery, "gateway.networking.k8s.io/v1", []requiredResource{
 			{Name: "httproutes", Kind: "HTTPRoute", Namespaced: true, Verbs: []string{verbGet, verbList, verbWatch}},
+			{Name: "tcproutes", Kind: "TCPRoute", Namespaced: true, Verbs: []string{verbGet, verbList, verbWatch}},
+			{Name: "udproutes", Kind: "UDPRoute", Namespaced: true, Verbs: []string{verbGet, verbList, verbWatch}},
 			{Name: "gateways", Kind: "Gateway", Namespaced: true, Verbs: []string{verbGet, verbList, verbWatch}},
 			{Name: "gatewayclasses", Kind: "GatewayClass", Namespaced: false, Verbs: []string{verbGet, verbList, verbWatch}},
 		}); err != nil {

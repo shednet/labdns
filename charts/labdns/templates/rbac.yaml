@@ -28,7 +28,7 @@ rules:
   verbs: [create, patch]
 {{- if .Values.gatewayAPI.enabled }}
 - apiGroups: [gateway.networking.k8s.io]
-  resources: [httproutes, gateways, gatewayclasses, referencegrants]
+  resources: [httproutes, tcproutes, udproutes, gateways, gatewayclasses, referencegrants]
   verbs: [get, list, watch]
 {{- end }}
 ---

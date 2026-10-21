@@ -132,7 +132,3 @@ type DNSProviderList struct {
 	metav1.ListMeta `json:"metadata,omitzero"`
 	Items           []DNSProvider `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&DNSProvider{}, &DNSProviderList{})
-}

@@ -72,10 +72,10 @@ Install a fresh environment in this order:
    apply `dist/install.yaml`.
 
    Gateway API watches are opt-in. Before enabling them, install the tested
-   Gateway API v1.5.1 CRDs:
+   Gateway API v1.6.0 CRDs:
 
    ```sh
-   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.1/standard-install.yaml
+   kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.0/standard-install.yaml
    helm upgrade --install labdns oci://ghcr.io/shednet/charts/labdns \
      --namespace labdns-system --create-namespace \
      --version "${LABDNS_VERSION#v}" --set gatewayAPI.enabled=true
@@ -93,7 +93,7 @@ Install a fresh environment in this order:
    kubectl apply -f dnsproviders.yaml
    ```
 
-5. Opt existing Ingresses or HTTPRoutes into the matching profiles. The
+5. Opt existing Ingresses or Gateway API routes into the matching profiles. The
    versioned Ingress example shows the complete annotation and backend shape,
    but assumes that its namespace, Service, EndpointSlices, and Node labels
    already exist:
@@ -104,6 +104,11 @@ Install a fresh environment in this order:
    # Adapt the example to an existing workload before applying it.
    kubectl apply -f ingress-split-horizon.yaml
    ```
+
+   Optional [`TCPRoute`](../examples/tcp-route.yaml) and
+   [`UDPRoute`](../examples/udp-route.yaml) manifests show the annotations and
+   backend shape for those route kinds. Apply them only after installing the
+   Gateway API v1.6.0 CRDs and adapting their Gateway and Service references.
 
 6. Verify the controller and generated objects. Each managed source produces
    one `DNSEndpoint` per selected provider when at least one target resolves:
@@ -118,8 +123,9 @@ At startup labdns discovers the namespaced
 `externaldns.k8s.io/v1alpha1/dnsendpoints` resource before installing any
 controller. Missing or incompatible prerequisite APIs cause a clear startup
 failure. When Gateway API support is enabled, startup also requires the
-`gateway.networking.k8s.io/v1` HTTPRoute, Gateway, and GatewayClass resources
-and the `gateway.networking.k8s.io/v1beta1` ReferenceGrant resource. Readiness
+`gateway.networking.k8s.io/v1` HTTPRoute, TCPRoute, UDPRoute, Gateway, and
+GatewayClass resources and the `gateway.networking.k8s.io/v1beta1`
+ReferenceGrant resource. Readiness
 reports manager process health; it does not report leadership, cache
 synchronization, ExternalDNS, or backend DNS health.
 

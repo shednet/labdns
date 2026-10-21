@@ -48,6 +48,8 @@ rules:
   - gateways
   - httproutes
   - referencegrants
+  - tcproutes
+  - udproutes
   verbs:
   - get
   - list

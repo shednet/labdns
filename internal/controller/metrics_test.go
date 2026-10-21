@@ -202,11 +202,11 @@ func assertBoundedMetricLabels(t *testing.T, registry *prometheus.Registry) {
 			for _, label := range metric.Label {
 				switch label.GetName() {
 				case "controller":
-					if label.GetValue() != "ingress" && label.GetValue() != "httproute" && label.GetValue() != "lifecycle" {
+					if label.GetValue() != "ingress" && label.GetValue() != "httproute" && label.GetValue() != "tcproute" && label.GetValue() != "udproute" && label.GetValue() != "lifecycle" {
 						t.Fatalf("metric %s exposes unbounded controller value %q", family.GetName(), label.GetValue())
 					}
 				case "source_kind":
-					if label.GetValue() != "Ingress" && label.GetValue() != "HTTPRoute" {
+					if label.GetValue() != "Ingress" && label.GetValue() != "HTTPRoute" && label.GetValue() != "TCPRoute" && label.GetValue() != "UDPRoute" {
 						t.Fatalf("metric %s exposes unbounded source kind %q", family.GetName(), label.GetValue())
 					}
 				default:
