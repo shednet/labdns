@@ -25,7 +25,7 @@
           version = cliVersion;
           src = self;
           subPackages = [ "cmd/labdns" ];
-          vendorHash = "sha256-JWRWe43Bf4tZ5zB+os+BUHWvqH/x2chil21l2l7FVX0=";
+          vendorHash = "sha256-4zvXarIXa1p8JH9BSU4PnlI82uVn5jxmo9bHkndK0pU=";
           ldflags = [ "-s" "-w" "-X main.version=${cliVersion}" ];
           nativeBuildInputs = [ pkgs.installShellFiles ];
           postInstall = ''
