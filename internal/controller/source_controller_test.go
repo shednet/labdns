@@ -117,7 +117,7 @@ func TestRouteMapperQueriesOnlyConfiguredKind(t *testing.T) {
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{corev1.AddToScheme, discoveryv1.AddToScheme, networkingv1.AddToScheme, labdnsv1alpha1.AddToScheme, externaldnsv1alpha1.AddToScheme, gatewayv1.Install} {
+	for _, add := range []func(*runtime.Scheme) error{corev1.AddToScheme, discoveryv1.AddToScheme, networkingv1.AddToScheme, labdnsv1alpha1.AddToScheme, dnsendpoint.AddToScheme, gatewayv1.Install} {
 		if err := add(scheme); err != nil {
 			t.Fatal(err)
 		}

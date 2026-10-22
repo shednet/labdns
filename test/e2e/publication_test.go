@@ -51,6 +51,7 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	labdnsv1alpha1 "github.com/shednet/labdns/api/v1alpha1"
+	"github.com/shednet/labdns/internal/dnsendpoint"
 )
 
 const (
@@ -145,7 +146,7 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 	scheme := k8sruntime.NewScheme()
 	Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
 	Expect(labdnsv1alpha1.AddToScheme(scheme)).To(Succeed())
-	Expect(externaldnsv1alpha1.AddToScheme(scheme)).To(Succeed())
+	Expect(dnsendpoint.AddToScheme(scheme)).To(Succeed())
 	Expect(gatewayv1.Install(scheme)).To(Succeed())
 	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfig},

@@ -59,7 +59,7 @@ func (clock lifecycleClock) Now() time.Time { return clock.now }
 func lifecycleScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{networkingv1.AddToScheme, externaldnsv1alpha1.AddToScheme, gatewayv1.Install} {
+	for _, add := range []func(*runtime.Scheme) error{networkingv1.AddToScheme, dnsendpoint.AddToScheme, gatewayv1.Install} {
 		if err := add(scheme); err != nil {
 			t.Fatal(err)
 		}

@@ -32,7 +32,6 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	externaldnsv1alpha1 "sigs.k8s.io/external-dns/apis/v1alpha1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
@@ -40,6 +39,7 @@ import (
 	"golang.org/x/term"
 
 	labdnsv1alpha1 "github.com/shednet/labdns/api/v1alpha1"
+	"github.com/shednet/labdns/internal/dnsendpoint"
 	"github.com/shednet/labdns/internal/source"
 )
 
@@ -287,7 +287,7 @@ func prepare(parent context.Context, options *connectionOptions) (inspector, con
 	scheme := runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{
 		corev1.AddToScheme, appsv1.AddToScheme, networkingv1.AddToScheme, labdnsv1alpha1.AddToScheme,
-		externaldnsv1alpha1.AddToScheme, gatewayv1.Install,
+		dnsendpoint.AddToScheme, gatewayv1.Install,
 		gatewayv1beta1.Install,
 	} {
 		if err := add(scheme); err != nil {

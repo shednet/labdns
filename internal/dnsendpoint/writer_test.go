@@ -113,7 +113,7 @@ func (c *countingClient) Delete(ctx context.Context, object client.Object, optio
 func newWriter(t *testing.T, objects ...client.Object) (*Writer, *countingClient, *fakeClock) {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	if err := externaldnsv1alpha1.AddToScheme(scheme); err != nil {
+	if err := AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()

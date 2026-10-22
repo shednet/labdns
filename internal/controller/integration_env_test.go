@@ -35,11 +35,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	externaldnsv1alpha1 "sigs.k8s.io/external-dns/apis/v1alpha1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	labdnsv1alpha1 "github.com/shednet/labdns/api/v1alpha1"
+	"github.com/shednet/labdns/internal/dnsendpoint"
 )
 
 // integrationEnvironment is shared by all ordinary controller integration tests.
@@ -103,7 +103,7 @@ func integrationScheme() (*runtime.Scheme, error) {
 	for _, add := range []func(*runtime.Scheme) error{
 		clientgoscheme.AddToScheme,
 		labdnsv1alpha1.AddToScheme,
-		externaldnsv1alpha1.AddToScheme,
+		dnsendpoint.AddToScheme,
 		gatewayv1.Install,
 		gatewayv1beta1.Install,
 	} {

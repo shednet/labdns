@@ -43,7 +43,7 @@ import (
 func TestRecordsFlattenFilterAndLifecycle(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
-	if err := externaldnsv1alpha1.AddToScheme(scheme); err != nil {
+	if err := dnsendpoint.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	object := &externaldnsv1alpha1.DNSEndpoint{
@@ -79,7 +79,7 @@ func TestRecordsFlattenFilterAndLifecycle(t *testing.T) {
 func TestDetailsCorrelatesProviderAndSource(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{externaldnsv1alpha1.AddToScheme, labdnsv1alpha1.AddToScheme} {
+	for _, add := range []func(*runtime.Scheme) error{dnsendpoint.AddToScheme, labdnsv1alpha1.AddToScheme} {
 		if err := add(scheme); err != nil {
 			t.Fatal(err)
 		}
@@ -166,7 +166,7 @@ func TestObservationState(t *testing.T) {
 func TestLifecycleParseFailureIsInvalidAndLeavesActiveTargetsUnknown(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
-	if err := externaldnsv1alpha1.AddToScheme(scheme); err != nil {
+	if err := dnsendpoint.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	object := &externaldnsv1alpha1.DNSEndpoint{
@@ -321,7 +321,7 @@ func TestStatusReportsHealthyControllerAndPrerequisites(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{
-		corev1.AddToScheme, appsv1.AddToScheme, externaldnsv1alpha1.AddToScheme, labdnsv1alpha1.AddToScheme,
+		corev1.AddToScheme, appsv1.AddToScheme, dnsendpoint.AddToScheme, labdnsv1alpha1.AddToScheme,
 	} {
 		if err := add(scheme); err != nil {
 			t.Fatal(err)
@@ -351,7 +351,7 @@ func TestStatusReportsMissingTCPAndUDPRoutePrerequisites(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{
-		corev1.AddToScheme, appsv1.AddToScheme, externaldnsv1alpha1.AddToScheme, labdnsv1alpha1.AddToScheme,
+		corev1.AddToScheme, appsv1.AddToScheme, dnsendpoint.AddToScheme, labdnsv1alpha1.AddToScheme,
 	} {
 		if err := add(scheme); err != nil {
 			t.Fatal(err)
