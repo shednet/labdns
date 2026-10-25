@@ -17,6 +17,10 @@ Local runs export diagnostics and then clean up automatically. CI alone sets
 diagnostics; the workflow's unconditional cleanup then deletes the exact named
 cluster. Never use that opt-out without an equally reliable caller cleanup.
 
+CI remains Docker-only. Rootless Podman support is for local validation
+without granting Docker-daemon access; do not add Podman CI checks merely
+for runtime parity.
+
 Every run has a collision-resistant cluster name and invocation ID. Local
 `make test-e2e` generates both once and passes them unchanged through setup,
 tests, diagnostics, and cleanup. CI defines a deterministic pair from its run
@@ -67,7 +71,8 @@ uses a 30-second source grace so normal Deployment readiness probes leave time
 to observe retained records after recovery. Normal convergence stays at 10 seconds.
 Lifecycle fixtures use one IPv4 address because ExternalDNS v0.21.0's CoreDNS
 backend can leave stale keys when deleting a whole multi-target dual-stack name
-(tracked in Beads as `labdns-next-vj2`). Shared-source publication and target
+(maintainer follow-up: [DNS-1](https://kaneo.shednet.dev/dashboard/workspace/c7cOUUw5FPPUJ4pk3KITlrPhj9Ahjj7s/project/w3qwp98zibg2z1fapcn5krwx/task/im1082a73hsbvm0yq54c0n4e)). Contributors without push access do not need
+Kaneo access to work on this limitation. Shared-source publication and target
 updates still assert exact A and AAAA sets for every source kind.
 
 ## Assertion rules

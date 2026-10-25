@@ -3,6 +3,26 @@
 labdns is a Kubebuilder v4 project with module identity
 `github.com/shednet/labdns`.
 
+## Task tracking (maintainers with push access only)
+
+This section applies only to maintainers with push access to `shednet/labdns`.
+Other contributors should use GitHub issues and pull requests; they do not need
+Kaneo access, authentication, or task updates.
+
+For those maintainers, Kaneo's `shednet/DNS` project is the source of truth for
+tasks and handoff.
+The repository's `.kaneo.json` selects the workspace and project. Check
+`kaneo context` before making changes.
+
+The board is **To Do → In Progress → Done**. Use Kaneo's separate Backlog
+view (`planned` status) for deferred work with an explicit revisit trigger;
+do not create a Backlog board column. Record blockers on the task and close it
+after its acceptance checks pass.
+
+`kaneo task list -p DNS --all` lists board tasks only in the installed CLI.
+`kaneo task export -p DNS` includes native Backlog tasks as well. Keep
+operational guidance in repository documentation and link it from tasks.
+
 ## Architecture boundary
 
 labdns reads Ingress and, when enabled, Gateway API sources. It resolves their

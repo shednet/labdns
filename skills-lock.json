@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "kaneo-cli": {
+      "source": "usekaneo/kaneo",
+      "sourceType": "github",
+      "skillPath": "skills/kaneo-cli/SKILL.md",
+      "computedHash": "19af67959c872b46c6b3c6ec3f25ac6e06fa46cf4fbf38e4a73ceb4539579896"
+    }
+  }
+}
