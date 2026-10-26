@@ -2,7 +2,7 @@
 
 # Build the manager binary on the native builder platform. Go cross-compiles
 # the static binary for the requested target platform without QEMU.
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.3@sha256:f24164268fc1e741bbdc0066dbadcf1c8426c5a8489f0729c02c3905a53032fd AS builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -26,7 +26,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpat
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot@sha256:516757106de35205efb70b91ba03f6f1298424a0678c603255cf2852a7000087
+FROM gcr.io/distroless/static:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532
